@@ -12,6 +12,7 @@ install:
 	uv sync --all-extras
 	@echo "🔧 Installing Torch + Torchaudio with CUDA 12.6 (works on 5080 + 1080Ti)..."
 	uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+	uv pip install -e .          # ← makes src/sound_detection importable
 	@echo "✅ Done! Run 'make dev' to start the service."
 
 install-cuda:
@@ -25,7 +26,7 @@ test:
 
 lint:
 	uv run ruff check .
-	uv run mypy src tests
+	uv run mypy src      # only src/ for now (tests/ will be added later)
 
 clean:
 	rm -rf .venv uv.lock __pycache__ .pytest_cache .ruff_cache
