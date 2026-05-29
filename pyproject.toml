@@ -1,0 +1,59 @@
+[project]
+name = "sound-detection"
+version = "0.1.0"
+description = "Bioacoustics ML pipeline for wildlife detection (bats, birds, insects) — part of the weathervane ecosystem"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [{name = "Dave Caulton"}]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.5",
+    "sqlmodel>=0.0.22",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "structlog>=24.4",
+    "rich>=13.9",
+    "python-dotenv>=1.0",
+    # Audio & ML (Torch installed separately for CUDA compatibility)
+    "librosa>=0.10",
+    "soundfile>=0.13",
+    "pydub>=0.25",
+    "mlflow>=2.17",
+    "numpy>=2.1",
+    # Bioacoustics
+    "birdnetlib>=0.18.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.7",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = ["sound-detection[dev]"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF", "ANN"]
+ignore = ["ANN401"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+[tool.alembic]
+script_location = "src/sound_detection/db/migrations"
