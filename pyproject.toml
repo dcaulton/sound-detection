@@ -58,6 +58,7 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = [
     "fastapi",
+    "fastapi.*",
     "rich.console",
     "uvicorn"
 ]
