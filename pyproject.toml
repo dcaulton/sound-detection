@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.5",
     "sqlmodel>=0.0.22",
     "psycopg[binary]>=3.2",
+    "aiosqlite>=0.20",
     "alembic>=1.13",
     "structlog>=24.4",
     "rich>=13.9",
@@ -64,6 +65,10 @@ module = [
     "birdnetlib",
     "birdnetlib.*",
     "rich.console",
+    "alembic",
+    "sqlmodel",
+    "sqlalchemy",
+    "sqlalchemy.*",
     "uvicorn"
 ]
 ignore_missing_imports = true

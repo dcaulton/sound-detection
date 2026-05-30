@@ -22,10 +22,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # Postgres (will be used by db layer)
-    postgres_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/sound_detection"
+    # Database (Postgres on chakakhan, SQLite for local dev)
+    database_url: str = "sqlite+aiosqlite:///./sound_detection.db"
 
-    # MLflow tracking (local by default, easy to point at your cluster later)
+    # MLflow tracking
     mlflow_tracking_uri: str = "http://localhost:5000"
 
     # Bioacoustics defaults
