@@ -7,6 +7,7 @@ import structlog
 from fastapi import FastAPI
 from rich.console import Console
 
+from sound_detection.api.routers import detections
 from sound_detection.core.config import settings
 
 # Structured logging + rich console for dev
@@ -20,6 +21,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     console.print(f"[bold green]🚀 {settings.service_name} starting in {settings.environment} mode[/]")
     console.print(f"   MLflow tracking → {settings.mlflow_tracking_uri}")
     console.print(f"   Postgres        → {settings.postgres_url.split('@')[-1]}")
+    # Pre-load BirdNET analyzer on startup
+    from sound_detection.ml.inference import get_analyzer
+
+    get_analyzer()
     yield
     console.print("[bold red]⏹️  sound-detection shutting down[/]")
 
@@ -33,6 +38,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Include routers
+app.include_router(detections.router)
+
 
 @app.get("/health")
 async def health_check() -> dict[str, str | bool]:
@@ -41,7 +49,7 @@ async def health_check() -> dict[str, str | bool]:
         "status": "healthy",
         "service": settings.service_name,
         "environment": settings.environment,
-        "gpu_available": True,  # we'll hook real Torch check here later
+        "gpu_available": True,
     }
 
 

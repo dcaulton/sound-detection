@@ -8,6 +8,7 @@ license = {text = "MIT"}
 authors = [{name = "Dave Caulton"}]
 dependencies = [
     "fastapi>=0.115",
+    "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.32",
     "pydantic-settings>=2.5",
     "sqlmodel>=0.0.22",
@@ -22,6 +23,7 @@ dependencies = [
     "pydub>=0.25",
     "mlflow>=2.17",
     "numpy>=2.1",
+    "resampy>=0.4.0",
     # Bioacoustics
     "birdnetlib>=0.18.1",
 ]
@@ -59,6 +61,8 @@ check_untyped_defs = true
 module = [
     "fastapi",
     "fastapi.*",
+    "birdnetlib",
+    "birdnetlib.*",
     "rich.console",
     "uvicorn"
 ]
