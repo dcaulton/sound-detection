@@ -1,39 +1,57 @@
 """FastAPI router for audio detection endpoints."""
 
-import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from uuid import UUID, uuid4
 
+import structlog
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from sound_detection.db.models import Recording
+from sound_detection.db.repositories import RecordingRepository
+from sound_detection.db.session import get_db
 from sound_detection.ml.inference import analyze_audio
-from sound_detection.schemas.detection import AnalyzeAudioRequest, AnalyzeAudioResponse
+from sound_detection.schemas.detection import AnalyzeAudioRequest
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/detections", tags=["detections"])
 
 
-@router.post("/analyze", response_model=AnalyzeAudioResponse)
+async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: str) -> None:
+    try:
+        result = analyze_audio(audio_bytes=audio_bytes, filename=filename)
+        log.info("Background analysis complete", recording_id=recording_id, detections=len(result.detections))
+    except Exception:
+        log.exception("Background analysis failed", recording_id=recording_id)
+
+
+@router.post("/analyze", status_code=202)
 async def analyze_audio_file(
+    background_tasks: BackgroundTasks,  # MUST BE LAST
     file: UploadFile = File(...),  # noqa: B008
     metadata: AnalyzeAudioRequest = Depends(),  # noqa: B008
-) -> AnalyzeAudioResponse:
-    """Analyze uploaded audio file from a microphone and return wildlife detections."""
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Upload audio → returns immediately, processing happens in background."""
     if not file.filename or not file.filename.lower().endswith((".wav", ".mp3", ".flac")):
         raise HTTPException(400, "Only WAV, MP3, or FLAC files are supported")
 
-    log.info("Received audio for analysis", filename=file.filename, size=file.size)
-
     content = await file.read()
 
-    try:
-        result = analyze_audio(
-            audio_bytes=content,
-            filename=file.filename,
-            mic_id=metadata.mic_id,
-            latitude=metadata.latitude,
-            longitude=metadata.longitude,
-            recording_date=metadata.recording_date,
-        )
-        log.info("Analysis complete", detections=len(result.detections))
-        return result
-    except Exception as e:
-        log.exception("Analysis failed")
-        raise HTTPException(500, f"Analysis failed: {e!s}") from e
+    repo = RecordingRepository(db)
+    recording = Recording(
+        microphone_id=metadata.mic_id or uuid4(),
+        filename=file.filename,
+        file_path=f"/tmp/{file.filename}",
+        status="pending",
+    )
+    recording = await repo.create(recording)
+
+    background_tasks.add_task(background_analyze, recording.id, content, file.filename)
+
+    log.info("Upload accepted for background processing", recording_id=recording.id)
+
+    return {
+        "message": "Processing started",
+        "recording_id": str(recording.id),
+        "status": "pending",
+    }
