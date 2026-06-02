@@ -39,7 +39,7 @@ async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query
     result = await db.execute(
         select(Recording)
         .options(selectinload(Recording.detections))  # type: ignore[arg-type]
-        .order_by(desc(Recording.uploaded_at))
+        .order_by(desc(Recording.uploaded_at))  # type: ignore[arg-type]
         .limit(limit)
     )
     recordings = result.all()
