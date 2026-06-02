@@ -3,8 +3,11 @@
 from uuid import UUID, uuid4
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from sqlalchemy import desc
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlmodel import select
 
 from sound_detection.db.models import Recording
 from sound_detection.db.repositories import RecordingRepository
@@ -28,6 +31,48 @@ async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: s
         log.info("Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections))
     except Exception:
         log.exception("Background analysis failed", recording_id=recording_id)
+
+
+@router.get("/recordings")
+async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query(50, le=100)) -> list[dict]:  # noqa: B008
+    """List recent recordings."""
+    result = await db.execute(
+        select(Recording)
+        .options(selectinload(Recording.detections))  # type: ignore[arg-type]
+        .order_by(desc(Recording.uploaded_at))
+        .limit(limit)
+    )
+    recordings = result.all()
+    return [
+        {
+            "id": str(r.Recording.id),
+            "filename": r.Recording.filename,
+            "status": r.Recording.status,
+            "uploaded_at": r.Recording.uploaded_at.isoformat() if r.Recording.uploaded_at else None,
+            "detections_count": len(r.Recording.detections) if hasattr(r.Recording, "detections") else 0,
+            "detections": [
+                {
+                    "species": d.species,
+                    "common_name": d.common_name,
+                    "confidence": d.confidence,
+                    "start_time": d.start_time,
+                    "end_time": d.end_time,
+                }
+                for d in getattr(r.Recording, "detections", [])
+            ],
+        }
+        for r in recordings
+    ]
+
+
+@router.get("/recordings/{recording_id}")
+async def get_recording(recording_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:  # noqa: B008
+    """Get a recording with its detections."""
+    repo = RecordingRepository(db)
+    recording = await repo.get(recording_id)
+    if not recording:
+        raise HTTPException(404, "Recording not found")
+    return {"id": str(recording.id), "status": recording.status}
 
 
 @router.post("/analyze", status_code=202)
