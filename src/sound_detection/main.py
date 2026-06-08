@@ -7,7 +7,7 @@ import structlog
 from fastapi import FastAPI
 from rich.console import Console
 
-from sound_detection.api.routers import detections, microphones, sites
+from sound_detection.api.v1.routers import detections, microphones, sites
 from sound_detection.core.config import settings
 
 log = structlog.get_logger()

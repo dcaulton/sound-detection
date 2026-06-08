@@ -25,7 +25,7 @@ install-tensorflow:
 
 dev: install
 	DATABASE_URL=postgresql://sound:sound@localhost:5433/sound_detection \
-	uv run uvicorn src.sound_detection.api.main:app --reload
+	uv run uvicorn src.sound_detection.main:app --reload
 
 test:
 	uv run pytest -v

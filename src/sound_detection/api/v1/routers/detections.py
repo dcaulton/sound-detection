@@ -1,5 +1,6 @@
 """FastAPI router for audio detection endpoints."""
 
+from datetime import datetime, timedelta
 from uuid import UUID
 
 import structlog
@@ -7,9 +8,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Qu
 from sqlalchemy import desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlmodel import select
+from sqlmodel import func, select
 
-from sound_detection.db.models import Recording
+from sound_detection.db.models import Detection, Recording
 from sound_detection.db.repositories import RecordingRepository
 from sound_detection.db.session import AsyncSessionLocal, get_db
 from sound_detection.ml.inference import analyze_audio
@@ -17,6 +18,7 @@ from sound_detection.schemas.detection import AnalyzeAudioRequest
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/detections", tags=["detections"])
+db_dep = Depends(get_db)
 
 
 async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: str) -> None:
@@ -26,7 +28,7 @@ async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: s
         # Create fresh session for background task
         async with AsyncSessionLocal() as db:
             repo = RecordingRepository(db)
-            repo.save_detections(recording_id, [d.model_dump() for d in result.detections])
+            await repo.save_detections(recording_id, [d.model_dump() for d in result.detections])
 
         log.info("Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections))
     except Exception:
@@ -66,10 +68,10 @@ async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query
 
 
 @router.get("/recordings/{recording_id}")
-async def get_recording(recording_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:  # noqa: B008
+async def get_recording(recording_id: UUID, db: AsyncSession = db_dep) -> dict:
     """Get a recording with its detections."""
     repo = RecordingRepository(db)
-    recording = repo.get(recording_id)
+    recording = await repo.get(recording_id)
     if not recording:
         raise HTTPException(404, "Recording not found")
     return {"id": str(recording.id), "status": recording.status}
@@ -80,7 +82,7 @@ async def analyze_audio_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),  # noqa: B008
     metadata: AnalyzeAudioRequest = Depends(),  # noqa: B008
-    db: AsyncSession = Depends(get_db),  # noqa: B008
+    db: AsyncSession = db_dep,
 ) -> dict:
     """Upload audio → returns immediately, processing happens in background."""
     if not file.filename or not file.filename.lower().endswith((".wav", ".mp3", ".flac")):
@@ -91,7 +93,7 @@ async def analyze_audio_file(
 
     # Get or create a microphone if none was specified
     if not metadata.mic_id:
-        default_mic = repo.get_or_create_default_microphone()
+        default_mic = await repo.get_or_create_default_microphone()
         mic_id: UUID = default_mic.id
     else:
         mic_id = metadata.mic_id  # type: ignore[assignment]
@@ -102,7 +104,7 @@ async def analyze_audio_file(
         file_path=f"/tmp/{file.filename}",
         status="pending",
     )
-    recording = repo.create(recording)
+    recording = await repo.create(recording)
 
     background_tasks.add_task(background_analyze, recording.id, content, file.filename)
 
@@ -113,3 +115,27 @@ async def analyze_audio_file(
         "recording_id": str(recording.id),
         "status": "pending",
     }
+
+
+@router.get("/analytics/species-counts")
+async def get_species_counts(days: int = 7, db: AsyncSession = db_dep) -> list[dict]:
+    """Return count of each species detected in the last N days."""
+    since = datetime.utcnow() - timedelta(days=days)
+
+    stmt = (
+        select(Detection.scientific_name, Detection.common_name, func.count().label("count"))
+        .join(Recording)
+        .where(Recording.uploaded_at >= since)
+        .group_by(Detection.scientific_name, Detection.common_name)
+        .order_by(func.count().desc())
+    )
+
+    result = await db.execute(stmt)
+    return [
+        {
+            "scientific_name": row.scientific_name,
+            "common_name": row.common_name,
+            "count": row.count,
+        }
+        for row in result.all()
+    ]

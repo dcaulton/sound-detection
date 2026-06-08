@@ -2,7 +2,7 @@
 
 from fastapi.testclient import TestClient
 
-from sound_detection.api.main import app
+from sound_detection.main import app
 
 client = TestClient(app)
 

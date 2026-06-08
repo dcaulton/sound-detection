@@ -7,9 +7,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
 
-from sound_detection.api.main import app
 from sound_detection.db.models import SQLModel
 from sound_detection.db.session import get_db
+from sound_detection.main import app
 
 postgres_container = PostgresContainer(
     image="postgres:16",
