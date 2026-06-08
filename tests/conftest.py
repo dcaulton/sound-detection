@@ -1,9 +1,12 @@
-from collections.abc import Generator
+import os
+from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
 
@@ -18,12 +21,30 @@ postgres_container = PostgresContainer(
     dbname="sound_detection_test",
 )
 
+
+# These will be initialized inside the setup_test_database fixture
+async_engine = None
+AsyncTestingSessionLocal = None
 TestingSessionLocal = None
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_database() -> Generator[None, None, None]:
     postgres_container.start()
+
+    host = postgres_container.get_container_host_ip()
+    port = postgres_container.get_exposed_port(5432)
+    user = postgres_container.username
+    password = postgres_container.password
+    db = postgres_container.dbname
+
+    async_url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+
+    os.environ["DATABASE_URL"] = async_url
+
+    global async_engine, AsyncTestingSessionLocal
+    async_engine = create_async_engine(async_url, echo=False)
+    AsyncTestingSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
 
     host = postgres_container.get_container_host_ip()
     port = postgres_container.get_exposed_port(5432)
@@ -40,12 +61,9 @@ def setup_test_database() -> Generator[None, None, None]:
 
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-    def override_get_db() -> Generator[Any, None, None]:
-        db = TestingSessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with AsyncTestingSessionLocal() as session:
+            yield session
 
     app.dependency_overrides[get_db] = override_get_db
 
@@ -67,3 +85,11 @@ def db() -> Generator[Any, None, None]:
         yield session
     finally:
         session.close()
+
+
+@pytest_asyncio.fixture
+async def test_session() -> AsyncGenerator[AsyncSession, None]:
+    if AsyncTestingSessionLocal is None:
+        raise RuntimeError("AsyncTestingSessionLocal has not been initialized")
+    async with AsyncTestingSessionLocal() as session:
+        yield session
