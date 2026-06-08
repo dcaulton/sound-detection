@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: sound-detection-postgres
+    environment:
+      POSTGRES_USER: sound
+      POSTGRES_PASSWORD: sound
+      POSTGRES_DB: sound_detection
+    ports:
+      - "5433:5432"
+    volumes:
+      - sound_detection_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sound -d sound_detection"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  sound_detection_postgres_data:

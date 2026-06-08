@@ -1,4 +1,4 @@
-.PHONY: help install install-cuda install-tensorflow dev test lint clean
+.PHONY: help install install-cuda install-tensorflow dev test lint clean db-upgrade db-downgrade
 
 help:
 	@echo "sound-detection — Bioacoustics ML service"
@@ -23,11 +23,12 @@ install-tensorflow:
 	@echo "🔧 Installing tensorflow-cpu (lighter, sufficient for BirdNET TFLite)..."
 	uv pip install tensorflow-cpu
 
-dev:
-	uv run uvicorn sound_detection.api.main:app --reload --host 0.0.0.0 --port 8000
+dev: install
+	DATABASE_URL=postgresql://sound:sound@localhost:5433/sound_detection \
+	uv run uvicorn src.sound_detection.api.main:app --reload
 
 test:
-	uv run pytest
+	uv run pytest -v
 
 lint:
 	uv run ruff check .
@@ -37,3 +38,9 @@ lint:
 clean:
 	rm -rf .venv uv.lock __pycache__ .pytest_cache .ruff_cache
 	uv cache clean
+
+db-upgrade:
+	uv run alembic upgrade head
+
+db-downgrade:
+	uv run alembic downgrade -1

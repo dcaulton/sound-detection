@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "sound-detection"
 version = "0.1.0"
@@ -29,14 +33,17 @@ dependencies = [
     "birdnetlib>=0.18.1",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "ruff>=0.7",
-    "mypy>=1.13",
-    "pre-commit>=4.0",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "pre-commit>=3.8.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.23",
     "httpx>=0.27",
+    "testcontainers[postgres]>=4.14.2",
+    "sqlalchemy[mypy]>=2.0.50",
+    "pydantic[mypy]>=2.13.4",
 ]
 
 [dependency-groups]
@@ -57,6 +64,7 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 check_untyped_defs = true
+strict = false
 
 [[tool.mypy.overrides]]
 module = [
@@ -69,7 +77,9 @@ module = [
     "sqlmodel",
     "sqlalchemy",
     "sqlalchemy.*",
-    "uvicorn"
+    "testcontainers.*",
+    "uuid",
+    "uvicorn",
 ]
 ignore_missing_imports = true
 

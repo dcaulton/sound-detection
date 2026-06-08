@@ -1,6 +1,6 @@
 """FastAPI router for audio detection endpoints."""
 
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -26,7 +26,7 @@ async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: s
         # Create fresh session for background task
         async with AsyncSessionLocal() as db:
             repo = RecordingRepository(db)
-            await repo.save_detections(recording_id, [d.model_dump() for d in result.detections])
+            repo.save_detections(recording_id, [d.model_dump() for d in result.detections])
 
         log.info("Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections))
     except Exception:
@@ -69,7 +69,7 @@ async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query
 async def get_recording(recording_id: UUID, db: AsyncSession = Depends(get_db)) -> dict:  # noqa: B008
     """Get a recording with its detections."""
     repo = RecordingRepository(db)
-    recording = await repo.get(recording_id)
+    recording = repo.get(recording_id)
     if not recording:
         raise HTTPException(404, "Recording not found")
     return {"id": str(recording.id), "status": recording.status}
@@ -87,15 +87,22 @@ async def analyze_audio_file(
         raise HTTPException(400, "Only WAV, MP3, or FLAC files are supported")
 
     content = await file.read()
-
     repo = RecordingRepository(db)
+
+    # Get or create a microphone if none was specified
+    if not metadata.mic_id:
+        default_mic = repo.get_or_create_default_microphone()
+        mic_id: UUID = default_mic.id
+    else:
+        mic_id = metadata.mic_id  # type: ignore[assignment]
+
     recording = Recording(
-        microphone_id=metadata.mic_id or uuid4(),
+        microphone_id=mic_id,
         filename=file.filename,
         file_path=f"/tmp/{file.filename}",
         status="pending",
     )
-    recording = await repo.create(recording)
+    recording = repo.create(recording)
 
     background_tasks.add_task(background_analyze, recording.id, content, file.filename)
 

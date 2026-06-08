@@ -7,9 +7,8 @@ import structlog
 from fastapi import FastAPI
 from rich.console import Console
 
-from sound_detection.api.routers import detections
+from sound_detection.api.routers import detections, microphones, sites
 from sound_detection.core.config import settings
-from sound_detection.db.session import init_db
 
 log = structlog.get_logger()
 console = Console()
@@ -19,7 +18,6 @@ console = Console()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown events."""
     console.print(f"[bold green]🚀 {settings.service_name} starting[/]")
-    init_db()
     yield
     console.print("[bold red]⏹️  sound-detection shutting down[/]")
 
@@ -32,6 +30,8 @@ app = FastAPI(
 )
 
 app.include_router(detections.router)
+app.include_router(microphones.router)
+app.include_router(sites.router)
 
 
 @app.get("/health")
