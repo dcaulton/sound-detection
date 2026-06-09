@@ -1,6 +1,6 @@
 """FastAPI router for audio detection endpoints."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
@@ -10,11 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlmodel import func, select
 
-from sound_detection.db.models import Detection, Recording
+from sound_detection.db.models import Detection, Microphone, Recording
 from sound_detection.db.repositories import RecordingRepository
 from sound_detection.db.session import AsyncSessionLocal, get_db
 from sound_detection.ml.inference import analyze_audio
 from sound_detection.schemas.detection import AnalyzeAudioRequest
+from sound_detection.utils.datetime import parse_recording_datetime_from_filename
 
 log = structlog.get_logger()
 router = APIRouter(prefix="/detections", tags=["detections"])
@@ -28,7 +29,9 @@ async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: s
         # Create fresh session for background task
         async with AsyncSessionLocal() as db:
             repo = RecordingRepository(db)
-            await repo.save_detections(recording_id, [d.model_dump() for d in result.detections])
+            await repo.save_detections(
+                recording_id=recording_id, detections=[d.model_dump() for d in result.detections]
+            )
 
         log.info("Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections))
     except Exception:
@@ -62,6 +65,7 @@ async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query
                 }
                 for d in getattr(r.Recording, "detections", [])
             ],
+            "microphone_id": r.Recording.microphone_id,
         }
         for r in recordings
     ]
@@ -98,10 +102,19 @@ async def analyze_audio_file(
     else:
         mic_id = metadata.mic_id  # type: ignore[assignment]
 
+    # Parse recorded_at from filename using the microphone's timezone ===
+    mic = await db.get(Microphone, mic_id)
+    tz_name = mic.site.timezone if mic and mic.site else "UTC"
+
+    recorded_at = parse_recording_datetime_from_filename(filename=file.filename, timezone=tz_name) or datetime.now(
+        UTC
+    )  # fallback to upload time
+
     recording = Recording(
         microphone_id=mic_id,
         filename=file.filename,
         file_path=f"/tmp/{file.filename}",
+        recorded_at=recorded_at,
         status="pending",
     )
     recording = await repo.create(recording)

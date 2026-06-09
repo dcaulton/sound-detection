@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sound-detection"
-version = "0.1.0"
+version = "0.2.0"
 description = "Bioacoustics ML pipeline for wildlife detection (bats, birds, insects) — part of the weathervane ecosystem"
 readme = "README.md"
 requires-python = ">=3.12"

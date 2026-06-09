@@ -7,7 +7,7 @@ import structlog
 from fastapi import FastAPI
 from rich.console import Console
 
-from sound_detection.api.v1.routers import detections, microphones, sites
+from sound_detection.api.v1.routers import detections, microphones, recordings, sites
 from sound_detection.core.config import settings
 
 log = structlog.get_logger()
@@ -25,12 +25,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="sound-detection",
     description="Bioacoustics ML pipeline for wildlife detection (bats, birds, insects)",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 app.include_router(detections.router)
 app.include_router(microphones.router)
+app.include_router(recordings.router)
 app.include_router(sites.router)
 
 

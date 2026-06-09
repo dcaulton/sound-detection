@@ -1,7 +1,7 @@
 import os
 from logging.config import fileConfig
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, engine_from_config, pool
 from sqlmodel import SQLModel
 
 config = context.config
@@ -36,9 +36,14 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section) or {},
-        prefix="sqlalchemy.",
+    url = config.get_main_option("sqlalchemy.url")
+
+    # Force modern psycopg driver (your project uses psycopg[binary], not psycopg2)
+    if url and url.startswith("postgresql://") and "+psycopg" not in url:
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+    connectable = create_engine(
+        url, # type: ignore[arg-type]
         poolclass=pool.NullPool,
     )
 
