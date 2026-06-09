@@ -4,13 +4,13 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from sound_detection.db.models import SQLModel
 from sound_detection.db.session import get_db
 from sound_detection.main import app
 
@@ -28,6 +28,21 @@ AsyncTestingSessionLocal = None
 TestingSessionLocal = None
 
 
+@pytest_asyncio.fixture
+async def async_session() -> AsyncGenerator[AsyncSession, None]:
+    """Provide a clean async database session for tests."""
+    async with AsyncTestingSessionLocal() as session:  # type: ignore[misc]
+        yield session
+
+
+@pytest.fixture(scope="session")
+def db_engine() -> AsyncEngine:
+    """Expose the async engine (useful for schema inspection tests)."""
+    if async_engine is None:
+        raise RuntimeError("async_engine not initialized")
+    return async_engine
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_database() -> Generator[None, None, None]:
     postgres_container.start()
@@ -39,28 +54,26 @@ def setup_test_database() -> Generator[None, None, None]:
     db = postgres_container.dbname
 
     async_url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
-
     os.environ["DATABASE_URL"] = async_url
 
+    # Create async engine
     global async_engine, AsyncTestingSessionLocal
     async_engine = create_async_engine(async_url, echo=False)
     AsyncTestingSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
 
-    host = postgres_container.get_container_host_ip()
-    port = postgres_container.get_exposed_port(5432)
-    user = postgres_container.username
-    password = postgres_container.password
-    db = postgres_container.dbname
-
+    # === Run real Alembic migrations instead of create_all() ===
     sync_url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+    engine = create_engine(sync_url)
 
-    global TestingSessionLocal
-    engine = create_engine(sync_url, echo=False)
+    # Make the engine available to tests via app.state
+    app.state.engine = engine
 
-    SQLModel.metadata.create_all(bind=engine)
+    # Run migrations
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", sync_url)
+    command.upgrade(alembic_cfg, "head")
 
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
+    # Override dependency
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
         async with AsyncTestingSessionLocal() as session:
             yield session

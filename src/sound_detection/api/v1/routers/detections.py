@@ -22,18 +22,34 @@ router = APIRouter(prefix="/detections", tags=["detections"])
 db_dep = Depends(get_db)
 
 
-async def background_analyze(recording_id: UUID, audio_bytes: bytes, filename: str) -> None:
+async def background_analyze(
+    recording_id: UUID, audio_bytes: bytes, filename: str, session: AsyncSession | None = None
+) -> None:
     try:
         result = analyze_audio(audio_bytes=audio_bytes, filename=filename)
 
-        # Create fresh session for background task
-        async with AsyncSessionLocal() as db:
-            repo = RecordingRepository(db)
-            await repo.save_detections(
-                recording_id=recording_id, detections=[d.model_dump() for d in result.detections]
-            )
+        close_session = False
+        if session is None:
+            session = AsyncSessionLocal()
+            close_session = True
+
+        repo = RecordingRepository(session)
+
+        # Update recording
+        recording = await session.get(Recording, recording_id)
+        if recording:
+            recording.status = "completed"
+            recording.duration_seconds = getattr(result, "file_duration", None)
+            session.add(recording)
+
+        await repo.save_detections(recording_id=recording_id, detections=[d.model_dump() for d in result.detections])
+
+        if close_session:
+            await session.commit()
+            await session.close()
 
         log.info("Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections))
+
     except Exception:
         log.exception("Background analysis failed", recording_id=recording_id)
 

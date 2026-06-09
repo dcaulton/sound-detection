@@ -85,3 +85,6 @@ ignore_missing_imports = true
 
 [tool.alembic]
 script_location = "src/sound_detection/db/migrations"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

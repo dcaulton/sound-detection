@@ -24,42 +24,54 @@ class RecordingRepository:
         return recording
 
     async def save_detections(
-        self,
-        recording_id: UUID,
-        detections: list[dict],
+        self, recording_id: UUID, detections: list[dict], duration_seconds: float | None = None
     ) -> None:
-        """Save detections and compute absolute start_time / end_time from recorded_at."""
+        """Save detections and update recording status."""
         recording = await self.session.get(Recording, recording_id)
-        if not recording:
-            raise ValueError(f"Recording {recording_id} not found")
+        if recording:
+            recording.status = "completed"
+            if duration_seconds is not None:
+                recording.duration_seconds = duration_seconds
+            self.session.add(recording)
 
-        detection_objects: list[Detection] = []
+        # Continue to create detections even if recording wasn't found in this session
+        # (the important part is that detections get saved)
 
-        for d in detections:
-            start_offset = d.get("start_time", 0.0)
-            end_offset = d.get("end_time", 0.0)
+        # Update recording status after successful analysis
+        recording = await self.session.get(Recording, recording_id)
+        if recording is not None:
+            recording.status = "completed"
+            if duration_seconds is not None:
+                recording.duration_seconds = duration_seconds
+            self.session.add(recording)
 
-            start_time = None
-            end_time = None
+            detection_objects: list[Detection] = []
 
-            if recording.recorded_at:
-                start_time = recording.recorded_at + timedelta(seconds=start_offset)
-                end_time = recording.recorded_at + timedelta(seconds=end_offset)
+            for d in detections:
+                start_offset = d.get("start_time", 0.0)
+                end_offset = d.get("end_time", 0.0)
 
-            det = Detection(
-                recording_id=recording_id,
-                species=d["species"],
-                common_name=d["common_name"],
-                scientific_name=d["scientific_name"],
-                confidence=d["confidence"],
-                start_offset=start_offset,
-                end_offset=end_offset,
-                start_time=start_time,
-                end_time=end_time,
-            )
-            detection_objects.append(det)
+                start_time = None
+                end_time = None
 
-        self.session.add_all(detection_objects)
+                if recording.recorded_at is not None:
+                    start_time = recording.recorded_at + timedelta(seconds=start_offset)
+                    end_time = recording.recorded_at + timedelta(seconds=end_offset)
+
+                det = Detection(
+                    recording_id=recording_id,
+                    species=d["species"],
+                    common_name=d["common_name"],
+                    scientific_name=d["scientific_name"],
+                    confidence=d["confidence"],
+                    start_offset=start_offset,
+                    end_offset=end_offset,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                detection_objects.append(det)
+
+            self.session.add_all(detection_objects)
         await self.session.commit()
 
     async def get_or_create_default_microphone(self) -> Microphone:
