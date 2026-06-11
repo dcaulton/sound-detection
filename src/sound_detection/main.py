@@ -7,7 +7,7 @@ import structlog
 from fastapi import FastAPI
 from rich.console import Console
 
-from sound_detection.api.v1.routers import detections, microphones, recordings, sites
+from sound_detection.api.v1.routers import detections, microphones, recordings, sites, species
 from sound_detection.core.config import settings
 
 log = structlog.get_logger()
@@ -33,6 +33,7 @@ app.include_router(detections.router)
 app.include_router(microphones.router)
 app.include_router(recordings.router)
 app.include_router(sites.router)
+app.include_router(species.router)
 
 
 @app.get("/health")

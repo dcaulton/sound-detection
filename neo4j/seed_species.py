@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Neo4j Species Seeder for Sound Detection project.
-
-Initial version uses a small, focused seed list.
-Designed to be idempotent and easy to extend later for incremental ingestion
-(single species or short lists when new detections occur).
+Neo4j Species Seeder with relationships.
+Idempotent. Safe to re-run.
 """
 
 import logging
@@ -24,13 +21,11 @@ logger = logging.getLogger(__name__)
 class Neo4jSeeder:
     def __init__(self, uri: str, user: str, password: str) -> None:
         self.driver: Driver = GraphDatabase.driver(uri, auth=(user, password))
-        logger.info("Connected to Neo4j")
 
     def close(self) -> None:
         self.driver.close()
 
     def upsert_species(self, species_data: dict[str, Any]) -> None:
-        """Idempotent upsert of a Species node."""
         query = """
         MERGE (s:Species {scientific_name: $scientific_name})
         ON CREATE SET
@@ -42,24 +37,68 @@ class Neo4jSeeder:
             s.common_name = coalesce($common_name, s.common_name),
             s.taxon = coalesce($taxon, s.taxon),
             s.updated_at = datetime()
-        RETURN s
         """
         with self.driver.session() as session:
             session.run(query, species_data)
-            logger.info(f"Upserted: {species_data['common_name']}")
+
+    def create_relationships(self) -> None:
+        """Create relationships between species, regions, and habitats."""
+        queries = [
+            # American Robin
+            """
+            MATCH (s:Species {scientific_name: 'Turdus migratorius'})
+            MERGE (r:Region {name: 'Illinois'})
+            MERGE (s)-[:RESIDENT_IN {status: 'year_round'}]->(r)
+            MERGE (h:Habitat {name: 'OakSavanna'})
+            MERGE (s)-[:BREEDS_IN]->(h)
+            """,
+            # House Sparrow (invasive resident)
+            """
+            MATCH (s:Species {scientific_name: 'Passer domesticus'})
+            MERGE (r:Region {name: 'Illinois'})
+            MERGE (s)-[:RESIDENT_IN {status: 'year_round'}]->(r)
+            """,
+            # Blue Jay
+            """
+            MATCH (s:Species {scientific_name: 'Cyanocitta cristata'})
+            MERGE (r:Region {name: 'Illinois'})
+            MERGE (s)-[:RESIDENT_IN {status: 'year_round'}]->(r)
+            MERGE (h:Habitat {name: 'OakSavanna'})
+            MERGE (s)-[:BREEDS_IN]->(h)
+            """,
+            # Red-winged Blackbird (strong prairie/wetland association)
+            """
+            MATCH (s:Species {scientific_name: 'Agelaius phoeniceus'})
+            MERGE (r:Region {name: 'Illinois'})
+            MERGE (s)-[:RESIDENT_IN {status: 'breeding'}]->(r)
+            MERGE (h:Habitat {name: 'TallgrassPrairie'})
+            MERGE (s)-[:BREEDS_IN]->(h)
+            MERGE (s)-[:INDICATOR_OF]->(h)
+            """,
+            # Red-tailed Hawk
+            """
+            MATCH (s:Species {scientific_name: 'Buteo jamaicensis'})
+            MERGE (r:Region {name: 'Illinois'})
+            MERGE (s)-[:RESIDENT_IN {status: 'year_round'}]->(r)
+            MERGE (h:Habitat {name: 'OakSavanna'})
+            MERGE (s)-[:BREEDS_IN]->(h)
+            """,
+        ]
+
+        with self.driver.session() as session:
+            for query in queries:
+                session.run(query)
+        logger.info("Relationships created/updated.")
 
     def seed_species(self, species_list: list[dict[str, Any]]) -> None:
-        """Seed or update a list of species."""
         logger.info(f"Seeding {len(species_list)} species...")
         for species in species_list:
             self.upsert_species(species)
-        logger.info("Seeding complete.")
+        self.create_relationships()
+        logger.info("Seeding + relationships complete.")
 
 
-# ============================================================
-# Initial focused seed list (as requested)
-# ============================================================
-
+# Initial species list
 INITIAL_SPECIES = [
     {"scientific_name": "Turdus migratorius", "common_name": "American Robin", "taxon": "Bird"},
     {"scientific_name": "Passer domesticus", "common_name": "House Sparrow", "taxon": "Bird"},
