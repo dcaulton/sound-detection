@@ -19,5 +19,27 @@ services:
       retries: 5
       start_period: 10s
 
+  neo4j:
+    image: neo4j:5.20
+    container_name: sound-detection-neo4j
+    ports:
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/password          # Change this in real dev
+      - NEO4J_PLUGINS=["apoc"]             # Very useful for data import & queries
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   sound_detection_postgres_data:
+  neo4j_data:
+  neo4j_logs:

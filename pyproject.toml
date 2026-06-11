@@ -31,10 +31,13 @@ dependencies = [
     "resampy>=0.4.0",
     # Bioacoustics
     "birdnetlib>=0.18.1",
+    "neo4j>=6.2.0",
+    "tensorflow-cpu>=2.21.0",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
+    "sound-detection[dev]",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
     "pre-commit>=3.8.0",
@@ -45,9 +48,6 @@ dev-dependencies = [
     "sqlalchemy[mypy]>=2.0.50",
     "pydantic[mypy]>=2.13.4",
 ]
-
-[dependency-groups]
-dev = ["sound-detection[dev]"]
 
 [tool.ruff]
 target-version = "py312"
