@@ -1,17 +1,20 @@
 from typing import Any
 
 import pytest
+from neo4j import Driver
 
-from neo4j import GraphDatabase
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
 
 
 @pytest.fixture(scope="module")
-def neo4j_driver() -> Any:
-    """Simple driver fixture for tests."""
-    driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "password"))
-    yield driver
-    driver.close()
+def neo4j_driver(neo4j_driver: Driver) -> Any:
+    # Seed the test database with our initial species
+    from neo4j_graph.seed_species import INITIAL_SPECIES, Neo4jSeeder
+
+    seeder = Neo4jSeeder(neo4j_driver)
+    seeder.seed_species(INITIAL_SPECIES)
+    yield neo4j_driver
+    neo4j_driver.close()
 
 
 def test_get_species_by_scientific_name(neo4j_driver: Any) -> None:

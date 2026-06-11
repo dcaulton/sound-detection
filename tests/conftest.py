@@ -7,12 +7,17 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from neo4j import Driver, GraphDatabase
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
 
 from sound_detection.db.session import get_db
 from sound_detection.main import app
+
+neo4j_container = Neo4jContainer("neo4j:5.20")
+neo4j_container.with_env("NEO4J_PLUGINS", '["apoc"]')
 
 postgres_container = PostgresContainer(
     image="postgres:16",
@@ -26,6 +31,15 @@ postgres_container = PostgresContainer(
 async_engine = None
 AsyncTestingSessionLocal = None
 TestingSessionLocal = None
+
+
+@pytest.fixture(scope="session")
+def neo4j_driver() -> Generator[Driver, None, None]:
+    neo4j_container.start()
+    driver = GraphDatabase.driver(neo4j_container.get_connection_url(), auth=("neo4j", "password"))
+    yield driver
+    driver.close()
+    neo4j_container.stop()
 
 
 @pytest_asyncio.fixture

@@ -9,7 +9,6 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-
 from neo4j import Driver, GraphDatabase
 
 load_dotenv()
@@ -19,8 +18,18 @@ logger = logging.getLogger(__name__)
 
 
 class Neo4jSeeder:
-    def __init__(self, uri: str, user: str, password: str) -> None:
-        self.driver: Driver = GraphDatabase.driver(uri, auth=(user, password))
+    def __init__(
+        self,
+        driver_or_uri: str | Driver,
+        user: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        if isinstance(driver_or_uri, Driver):
+            self.driver: Driver = driver_or_uri
+        else:
+            if user is None or password is None:
+                raise ValueError("user and password are required when passing a URI string")
+            self.driver = GraphDatabase.driver(driver_or_uri, auth=(user, password))
 
     def close(self) -> None:
         self.driver.close()
