@@ -43,7 +43,6 @@ def test_get_species_context(neo4j_driver: Any) -> None:
     result = service.get_species_context("Cyanocitta cristata")
 
     assert result is not None
-    assert result["scientific_name"] == "Cyanocitta cristata"
-    assert "migration_peak_months" in result
-    assert "breeds_in_habitats" in result
-    assert "indicator_for_habitats" in result
+    assert result["props"]["scientific_name"] == "Cyanocitta cristata"
+    assert "outgoing" in result
+    assert "incoming" in result

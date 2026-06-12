@@ -1,6 +1,7 @@
 from typing import Any
 
 from neo4j import Driver
+from neo4j.time import DateTime as Neo4jDateTime
 
 
 class SpeciesKnowledgeService:
@@ -24,6 +25,15 @@ class SpeciesKnowledgeService:
             result = session.run(query, scientific_name=scientific_name)
             record = result.single()
             return dict(record) if record else None
+
+    def _convert_neo4j_types(self, value: Any) -> Any:
+        if isinstance(value, Neo4jDateTime):
+            return value.to_native()  # converts to standard datetime.datetime
+        if isinstance(value, dict):
+            return {k: self._convert_neo4j_types(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._convert_neo4j_types(item) for item in value]
+        return value
 
     def get_species_residency(self, scientific_name: str) -> dict[str, Any] | None:
         """
@@ -75,24 +85,34 @@ class SpeciesKnowledgeService:
             }
 
     def get_species_context(self, scientific_name: str) -> dict[str, Any] | None:
+        query = """
+        MATCH (s:Species {scientific_name: $scientific_name})
+        OPTIONAL MATCH (s)-[r_out]->(target_out)
+        OPTIONAL MATCH (source_in)-[r_in]->(s)
+        RETURN 
+            properties(s) AS props,
+            collect(DISTINCT {
+                type: type(r_out),
+                target_labels: labels(target_out),
+                target_props: properties(target_out)
+            }) AS outgoing,
+            collect(DISTINCT {
+                type: type(r_in),
+                source_labels: labels(source_in),
+                source_props: properties(source_in)
+            }) AS incoming
         """
-        Returns combined context (basic info + residency + habitat).
-        This is what the /context endpoint should call.
-        """
-        basic = self.get_species_by_scientific_name(scientific_name)
-        if not basic:
-            return None
+        with self.driver.session() as session:
+            result = session.run(query, scientific_name=scientific_name)
+            record = result.single()
+            if not record:
+                return None
 
-        residency = self.get_species_residency(scientific_name) or {}
-        habitat = self.get_species_habitat_context(scientific_name) or {}
-
-        return {
-            **basic,
-            "residency": residency.get("residency_status"),
-            "migration_peak_months": residency.get("migration_peak_months"),
-            "breeds_in_habitats": habitat.get("breeds_in_habitats", []),
-            "indicator_for_habitats": habitat.get("indicator_for_habitats", []),
-        }
+            return {
+                "props": self._convert_neo4j_types(record["props"]),
+                "outgoing": self._convert_neo4j_types(record["outgoing"]),
+                "incoming": self._convert_neo4j_types(record["incoming"]),
+            }
 
     def list_all_species(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return a list of species (useful for debugging and basic UI)."""

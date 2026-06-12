@@ -4,12 +4,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from rich.console import Console
 
-from sound_detection.api.v1.routers import detections, microphones, recordings, sites, species
+from sound_detection.api.v1.routers import debug, detections, microphones, recordings, sites, species
 from sound_detection.core.config import settings
 
+load_dotenv()
 log = structlog.get_logger()
 console = Console()
 
@@ -29,6 +31,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.include_router(debug.router)
 app.include_router(detections.router)
 app.include_router(microphones.router)
 app.include_router(recordings.router)

@@ -75,6 +75,7 @@ module = [
     "rich.console",
     "alembic",
     "sqlmodel",
+    "ollama",
     "sqlalchemy",
     "sqlalchemy.*",
     "testcontainers.*",
