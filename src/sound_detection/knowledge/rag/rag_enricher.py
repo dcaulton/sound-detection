@@ -15,7 +15,7 @@ class RAGEnricher:
     Retrieves relevant chunks from the vector store and uses them as context for the LLM.
     """
 
-    def __init__(self, driver: Driver, model: str | None) -> None:
+    def __init__(self, driver: Driver, model: str | None = None) -> None:
         self.retriever = Retriever(driver)
         self.model = model or "qwen2.5:32b"
 

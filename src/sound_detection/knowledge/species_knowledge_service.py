@@ -163,9 +163,14 @@ class SpeciesKnowledgeService:
             if not record:
                 return None
 
+            outgoing = self._convert_neo4j_types(record["outgoing"])
+            for x in outgoing:
+                if "target_props" in x and "embedding" in x.get("target_props"):
+                    x.get("target_props").pop("embedding")
+
             return {
                 "props": self._convert_neo4j_types(record["props"]),
-                "outgoing": self._convert_neo4j_types(record["outgoing"]),
+                "outgoing": outgoing,
                 "incoming": self._convert_neo4j_types(record["incoming"]),
             }
 
