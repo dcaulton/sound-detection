@@ -11,6 +11,7 @@ n4j_dep_driver = Depends(get_neo4j_driver)
 
 class SeedRequest(BaseModel):
     scientific_name: str
+    extra_instructions: str | None
 
 
 def get_seed_service(driver: Driver = n4j_dep_driver) -> SeedOrUpdate:
@@ -25,5 +26,5 @@ def debug_seed_species(
     payload: SeedRequest,
     service: SeedOrUpdate = gss_dep,
 ) -> dict:
-    result = service.seed_or_update(payload.scientific_name)
+    result = service.seed_or_update(payload.scientific_name, payload.extra_instructions)
     return result

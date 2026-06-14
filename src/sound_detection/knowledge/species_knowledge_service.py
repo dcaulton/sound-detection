@@ -13,6 +13,61 @@ class SpeciesKnowledgeService:
     def __init__(self, driver: Driver) -> None:
         self.driver = driver
 
+    def upsert_species(self, data: dict) -> None:
+        # Separate scalar properties from relationship data
+        props = {
+            k: v for k, v in data.items() if not isinstance(v, list | dict) and v is not None and k != "scientific_name"
+        }
+
+        """Create or update the Species node and its properties."""
+        query = """
+        MERGE (s:Species {scientific_name: $scientific_name})
+        ON MATCH SET
+            s += $props,
+            s.updated_at = datetime()
+        ON CREATE SET 
+            s += $props,
+            s.created_at = datetime()
+        """
+
+        with self.driver.session() as session:
+            session.run(query, scientific_name=data["scientific_name"], props=props)
+
+    def upsert_relationships(self, data: dict) -> None:
+        """
+        Create/update relationships from the data dict.
+        Related nodes are created if they don't exist.
+        """
+        scientific_name = data.get("scientific_name")
+        if not scientific_name:
+            return
+
+        with self.driver.session() as session:
+            # Example: Handle residency
+            if "residency_status" in data and data.get("region"):
+                session.run(
+                    """
+                    MERGE (s:Species {scientific_name: $scientific_name})
+                    MERGE (r:Region {name: $region})
+                    MERGE (s)-[:RESIDENT_IN {status: $status}]->(r)
+                """,
+                    scientific_name=scientific_name,
+                    region=data.get("region", "Illinois"),
+                    status=data.get("residency_status"),
+                )
+
+            # Example: Handle habitat
+            if data.get("breeds_in_habitat"):
+                session.run(
+                    """
+                    MERGE (s:Species {scientific_name: $scientific_name})
+                    MERGE (h:Habitat {name: $habitat})
+                    MERGE (s)-[:BREEDS_IN]->(h)
+                """,
+                    scientific_name=scientific_name,
+                    habitat=data["breeds_in_habitat"],
+                )
+
     def get_species_by_scientific_name(self, scientific_name: str) -> dict[str, Any] | None:
         """Basic species lookup by scientific name."""
         query = """

@@ -24,7 +24,7 @@ class EbirdHarvester:
             # Step 1: Get species code from taxonomy
             species_code = self._get_species_code(scientific_name)
             if not species_code:
-                logger.info(f"Species not found in eBird taxonomy: {scientific_name}")
+                logger.warning(f"Species not found in eBird taxonomy: {scientific_name}")
                 return None
 
             # Step 2: Check if the species has been recorded in Illinois
@@ -36,7 +36,7 @@ class EbirdHarvester:
                 return None
 
             illinois_species = response.json()
-            is_in_illinois = any(s.get("speciesCode") == species_code for s in illinois_species)
+            is_in_illinois = species_code in illinois_species
 
             return {
                 "scientific_name": scientific_name,
@@ -51,18 +51,15 @@ class EbirdHarvester:
 
     def _get_species_code(self, scientific_name: str) -> str | None:
         """Resolve scientific name to eBird species code."""
-        url = f"{self.BASE_URL}/ref/taxonomy/ebird"
+        url = f"{self.BASE_URL}/ref/taxonomy/ebird?fmt=json"
         headers = {"X-eBirdApiToken": self.api_key}
 
-        try:
-            resp = requests.get(url, headers=headers, timeout=15)  # type: ignore[arg-type]
-            if resp.status_code != 200:
-                return None
+        resp = requests.get(url, headers=headers, timeout=15)  # type: ignore[arg-type]
+        if resp.status_code != 200:
+            return None
 
-            for sp in resp.json():
-                if sp.get("sciName") == scientific_name:
-                    return str(sp.get("speciesCode"))
-        except Exception:
-            pass
+        for sp in resp.json():
+            if sp.get("sciName") == scientific_name:
+                return str(sp.get("speciesCode"))
 
         return None
