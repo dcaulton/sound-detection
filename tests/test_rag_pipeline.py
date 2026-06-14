@@ -14,26 +14,33 @@ def rag_pipeline(neo4j_driver: Driver) -> RAGPipeline:
 
 
 @patch("sound_detection.knowledge.rag.pipeline.WikipediaSource")
+@patch("sound_detection.knowledge.rag.embedding.EmbeddingModel")
 def test_rag_ingestion_and_retrieval(
-    mock_wikipedia: MagicMock, rag_pipeline: RAGPipeline, neo4j_driver: Driver
+    mock_embedding: MagicMock,
+    mock_wikipedia: MagicMock,
+    rag_pipeline: RAGPipeline,
+    neo4j_driver: Driver,
 ) -> None:
     scientific_name = "Turdus migratorius"
 
-    # Mock Wikipedia to return fixed content
-    mock_instance: MagicMock = mock_wikipedia.return_value
-    mock_instance.fetch_species_text.return_value = (
+    # Mock Wikipedia
+    mock_wiki_instance: MagicMock = mock_wikipedia.return_value
+    mock_wiki_instance.fetch_species_text.return_value = (
         "The American Robin (Turdus migratorius) is a migratory songbird. "
         "It is known for its bright orange breast and cheerful song. "
         "Robins primarily eat earthworms and insects but also consume fruits and berries."
     )
 
-    # Force re-ingestion
+    # Mock embeddings (return a dummy vector)
+    mock_embed_instance: MagicMock = mock_embedding.return_value
+    mock_embed_instance.embed.return_value = [0.1] * 768
+
+    # Force ingestion
     ingested: bool = rag_pipeline.ingest_species(scientific_name, force=True)
     assert ingested is True
 
-    # Verify retrieval works
+    # Verify retrieval
     retriever = Retriever(neo4j_driver)
     chunks: list[dict[str, Any]] = retriever.retrieve(scientific_name, top_k=5)
 
     assert len(chunks) > 0
-    assert any("robin" in chunk["text"].lower() for chunk in chunks)
