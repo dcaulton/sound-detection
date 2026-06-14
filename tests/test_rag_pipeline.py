@@ -8,9 +8,9 @@ from sound_detection.knowledge.rag.retriever import Retriever
 
 
 @patch("sound_detection.knowledge.rag.pipeline.WikipediaSource")
-@patch("sound_detection.knowledge.rag.embedding.EmbeddingModel")
+@patch("ollama.embeddings")
 def test_rag_ingestion_and_retrieval(
-    mock_embedding: MagicMock,
+    mock_ollama_embeddings: MagicMock,
     mock_wikipedia: MagicMock,
     neo4j_driver: Driver,
 ) -> None:
@@ -24,18 +24,17 @@ def test_rag_ingestion_and_retrieval(
         "Robins primarily eat earthworms and insects but also consume fruits and berries."
     )
 
-    # Mock embeddings
-    mock_embed_instance: MagicMock = mock_embedding.return_value
-    mock_embed_instance.embed.return_value = [0.1] * 768
+    # Mock ollama.embeddings to return a dummy vector
+    mock_ollama_embeddings.return_value = {"embedding": [0.1] * 768}
 
-    # Create pipeline *after* patches are applied
+    # Create pipeline inside the test (after patches)
     rag_pipeline = RAGPipeline(neo4j_driver)
 
     # Force ingestion
     ingested: bool = rag_pipeline.ingest_species(scientific_name, force=True)
     assert ingested is True
 
-    # Verify retrieval
+    # Verify retrieval works
     retriever = Retriever(neo4j_driver)
     chunks: list[dict[str, Any]] = retriever.retrieve(scientific_name, top_k=5)
 
