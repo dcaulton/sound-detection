@@ -1,16 +1,10 @@
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
 from neo4j import Driver
 
 from sound_detection.knowledge.rag.pipeline import RAGPipeline
 from sound_detection.knowledge.rag.retriever import Retriever
-
-
-@pytest.fixture
-def rag_pipeline(neo4j_driver: Driver) -> RAGPipeline:
-    return RAGPipeline(neo4j_driver)
 
 
 @patch("sound_detection.knowledge.rag.pipeline.WikipediaSource")
@@ -18,7 +12,6 @@ def rag_pipeline(neo4j_driver: Driver) -> RAGPipeline:
 def test_rag_ingestion_and_retrieval(
     mock_embedding: MagicMock,
     mock_wikipedia: MagicMock,
-    rag_pipeline: RAGPipeline,
     neo4j_driver: Driver,
 ) -> None:
     scientific_name = "Turdus migratorius"
@@ -31,9 +24,12 @@ def test_rag_ingestion_and_retrieval(
         "Robins primarily eat earthworms and insects but also consume fruits and berries."
     )
 
-    # Mock embeddings (return a dummy vector)
+    # Mock embeddings
     mock_embed_instance: MagicMock = mock_embedding.return_value
     mock_embed_instance.embed.return_value = [0.1] * 768
+
+    # Create pipeline *after* patches are applied
+    rag_pipeline = RAGPipeline(neo4j_driver)
 
     # Force ingestion
     ingested: bool = rag_pipeline.ingest_species(scientific_name, force=True)
