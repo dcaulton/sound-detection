@@ -12,11 +12,13 @@ def rag_pipeline(neo4j_driver: Driver) -> RAGPipeline:
 
 
 @patch("sound_detection.knowledge.rag.pipeline.PDFSource")
+@patch("ollama.embeddings")
 @patch("sound_detection.knowledge.rag.embedding.EmbeddingModel")
 def test_ingest_pdf_without_species(
     mock_embedding: MagicMock,
+    mock_ollama_embeddings: MagicMock,
     mock_pdf: MagicMock,
-    rag_pipeline: RAGPipeline,
+    neo4j_driver: Driver,
 ) -> None:
     # Mock PDF content
     mock_pdf_instance = mock_pdf.return_value
@@ -26,10 +28,17 @@ def test_ingest_pdf_without_species(
     )
 
     # Mock embeddings
-    mock_embed_instance = mock_embedding.return_value
-    mock_embed_instance.embed.return_value = [0.1] * 768
+    mock_ollama_embeddings.return_value = {"embedding": [0.1] * 768}
+    mock_embedding.return_value.embed.return_value = [0.1] * 768
 
-    success = rag_pipeline.ingest_pdf(file_path="/tmp/test.pdf", source_name="test_birds", scientific_name=None)
+    # Create pipeline *inside* the test (after patches are active)
+    rag_pipeline = RAGPipeline(neo4j_driver)
+
+    success = rag_pipeline.ingest_pdf(
+        file_path="/tmp/test.pdf",
+        source_name="test_birds",
+        scientific_name=None,
+    )
 
     assert success is True
 
