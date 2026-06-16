@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from rich.console import Console
 
-from sound_detection.api.v1.routers import debug, detections, microphones, recordings, sites, species
+from sound_detection.api.v1.routers import debug, detections, knowledge, microphones, recordings, sites, species
 from sound_detection.core.config import settings
 
 load_dotenv()
@@ -33,6 +33,7 @@ app = FastAPI(
 
 app.include_router(debug.router)
 app.include_router(detections.router)
+app.include_router(knowledge.router)
 app.include_router(microphones.router)
 app.include_router(recordings.router)
 app.include_router(sites.router)

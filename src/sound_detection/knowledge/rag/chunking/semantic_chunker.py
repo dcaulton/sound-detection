@@ -18,29 +18,31 @@ class SemanticChunker:
         if not text or len(text.strip()) < 50:
             return []
 
-        # Split into sentences
+        # Split into sentences first
         sentences = re.split(r"(?<=[.!?])\s+", text)
         sentences = [s.strip() for s in sentences if s.strip()]
 
         chunks: list[dict[str, Any]] = []
         current_chunk: list[str] = []
         current_length = 0
+        max_size = self.max_chunk_size
 
         for sentence in sentences:
-            sentence_length = len(sentence)
-
-            if current_length + sentence_length > self.max_chunk_size and current_chunk:
+            if current_length + len(sentence) > max_size and current_chunk:
                 chunk_text = " ".join(current_chunk)
                 chunks.append({"text": chunk_text, "source": source, "chunk_index": len(chunks)})
-                current_chunk = [sentence]
-                current_length = sentence_length
-            else:
-                current_chunk.append(sentence)
-                current_length += sentence_length
+                current_chunk = []
+                current_length = 0
 
-        # Add the last chunk
+            # If a single sentence is still too long, hard-split it
+            while len(sentence) > max_size:
+                chunks.append({"text": sentence[:max_size], "source": source, "chunk_index": len(chunks)})
+                sentence = sentence[max_size:]
+
+            current_chunk.append(sentence)
+            current_length += len(sentence)
+
         if current_chunk:
-            chunk_text = " ".join(current_chunk)
-            chunks.append({"text": chunk_text, "source": source, "chunk_index": len(chunks)})
+            chunks.append({"text": " ".join(current_chunk), "source": source, "chunk_index": len(chunks)})
 
         return chunks

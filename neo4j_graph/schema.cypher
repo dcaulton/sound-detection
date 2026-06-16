@@ -28,6 +28,10 @@ CREATE INDEX species_taxon IF NOT EXISTS FOR (s:Species) ON (s.taxon);
 CREATE FULLTEXT INDEX species_search IF NOT EXISTS
 FOR (s:Species) ON EACH [s.common_name, s.scientific_name];
 
+// ---------- Full-text search on chunks for RAG ----------
+CREATE FULLTEXT INDEX chunk_text IF NOT EXISTS
+FOR (c:Chunk) ON EACH [c.text];
+
 // ============================================
 // Relationships (no data yet — just schema)
 // ============================================

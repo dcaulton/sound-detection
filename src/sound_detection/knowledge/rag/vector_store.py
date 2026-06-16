@@ -29,23 +29,36 @@ class Neo4jVectorStore:
             session.run(query)
             logger.info(f"Vector index '{self.index_name}' ensured.")
 
-    def add_chunks(self, scientific_name: str, chunks: list[dict[str, Any]]) -> None:
-        """Store chunks with embeddings for a species."""
-        query = """
-        MERGE (s:Species {scientific_name: $scientific_name})
-        WITH s
-        UNWIND $chunks AS chunk
-        CREATE (c:Chunk {
-            text: chunk.text,
-            embedding: chunk.embedding,
-            source: chunk.source,
-            chunk_index: chunk.chunk_index
-        })
-        CREATE (s)-[:HAS_CHUNK]->(c)
-        """
+    def add_chunks(self, chunks: list[dict[str, Any]], scientific_name: str | None = None) -> None:
+        if scientific_name:
+            query = """
+            MERGE (s:Species {scientific_name: $scientific_name})
+            WITH s
+            UNWIND $chunks AS chunk
+            CREATE (c:Chunk {
+                text: chunk.text,
+                embedding: chunk.embedding,
+                source: chunk.source,
+                chunk_index: chunk.chunk_index
+            })
+            CREATE (s)-[:HAS_CHUNK]->(c)
+            """
+            params: dict[str, Any] = {"scientific_name": scientific_name, "chunks": chunks}
+        else:
+            # General knowledge chunks (not linked to a species)
+            query = """
+            UNWIND $chunks AS chunk
+            CREATE (c:Chunk {
+                text: chunk.text,
+                embedding: chunk.embedding,
+                source: chunk.source,
+                chunk_index: chunk.chunk_index
+            })
+            """
+            params = {"chunks": chunks}
+
         with self.driver.session() as session:
-            session.run(query, scientific_name=scientific_name, chunks=chunks)
-            logger.info(f"Added {len(chunks)} chunks for {scientific_name}")
+            session.run(query, **params)
 
     def search(self, scientific_name: str, query_embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
         """Retrieve the most relevant chunks for a species."""

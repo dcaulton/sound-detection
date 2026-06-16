@@ -37,6 +37,7 @@ dependencies = [
     "wikipedia>=1.4.0",
     "beautifulsoup4>=4.15.0",
     "requests>=2.34.2",
+    "pypdf>=6.13.2",
 ]
 
 [dependency-groups]
