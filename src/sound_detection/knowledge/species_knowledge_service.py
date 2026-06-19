@@ -164,14 +164,23 @@ class SpeciesKnowledgeService:
                 return None
 
             outgoing = self._convert_neo4j_types(record["outgoing"])
+            outgoing = [x for x in outgoing if x.get("type") is not None]
             for x in outgoing:
-                if "target_props" in x and "embedding" in x.get("target_props"):
-                    x.get("target_props").pop("embedding")
+                target_props = x.get("target_props") or {}
+                if "embedding" in target_props:
+                    target_props.pop("embedding")
+
+            incoming = self._convert_neo4j_types(record["incoming"])
+            incoming = [x for x in incoming if x.get("type") is not None]
+            for x in incoming:
+                source_props = x.get("source_props") or {}
+                if "embedding" in source_props:
+                    source_props.pop("embedding")
 
             return {
                 "props": self._convert_neo4j_types(record["props"]),
                 "outgoing": outgoing,
-                "incoming": self._convert_neo4j_types(record["incoming"]),
+                "incoming": incoming,
             }
 
     def list_all_species(self, limit: int = 50) -> list[dict[str, Any]]:

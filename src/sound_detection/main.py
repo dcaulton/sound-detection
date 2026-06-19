@@ -1,5 +1,7 @@
 """FastAPI application for sound-detection."""
 
+import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,6 +14,7 @@ from sound_detection.api.v1.routers import debug, detections, knowledge, microph
 from sound_detection.core.config import settings
 
 load_dotenv()
+logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO"))
 log = structlog.get_logger()
 console = Console()
 

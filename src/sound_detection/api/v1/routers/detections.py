@@ -1,5 +1,6 @@
 """FastAPI router for audio detection endpoints."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -11,8 +12,10 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import func, select
 
 from sound_detection.db.models import Detection, Microphone, Recording
+from sound_detection.db.neo4j import get_neo4j_driver
 from sound_detection.db.repositories import RecordingRepository
 from sound_detection.db.session import AsyncSessionLocal, get_db
+from sound_detection.knowledge.seed_or_update import SeedOrUpdate
 from sound_detection.ml.inference import analyze_audio
 from sound_detection.schemas.detection import AnalyzeAudioRequest
 from sound_detection.utils.datetime import parse_recording_datetime_from_filename
@@ -26,7 +29,7 @@ async def background_analyze(
     recording_id: UUID, audio_bytes: bytes, filename: str, session: AsyncSession | None = None
 ) -> None:
     try:
-        result = analyze_audio(audio_bytes=audio_bytes, filename=filename)
+        result = await asyncio.to_thread(analyze_audio, audio_bytes=audio_bytes, filename=filename)
 
         close_session = False
         if session is None:
@@ -48,7 +51,18 @@ async def background_analyze(
             await session.commit()
             await session.close()
 
-        log.info("Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections))
+        # Trigger knowledge enrichment once per new species
+        unique_species = {d.species for d in result.detections}
+        for species in unique_species:
+            try:
+                seed = SeedOrUpdate(get_neo4j_driver())
+                [seed.seed_or_update(species) for species in unique_species]
+            except Exception:
+                log.exception(f"Failed to seed knowledge for species: {species}")
+
+        log.warning(
+            "Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections)
+        )
 
     except Exception:
         log.exception("Background analysis failed", recording_id=recording_id)

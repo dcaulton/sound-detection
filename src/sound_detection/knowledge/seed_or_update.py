@@ -29,7 +29,16 @@ class SeedOrUpdate:
         self.rag_enricher = RAGEnricher(driver)  # type: ignore[call-arg]
         self.service = SpeciesKnowledgeService(driver)
 
-    def seed_or_update(self, scientific_name: str, extra_instructions: str | None) -> dict:
+    def seed_or_update(self, scientific_name: str, extra_instructions: str | None = None) -> dict:
+        # Skip if species already has Wikipedia chunks (deeper enrichment already done)
+        try:
+            chunks = self.rag_enricher.retriever.retrieve(scientific_name, top_k=1)
+            if chunks and any(c.get("source") == "wikipedia" for c in chunks):
+                logger.info(f"Species {scientific_name} already enriched with Wikipedia chunks. Skipping.")
+                return {}
+        except Exception:
+            pass  # proceed if retrieval check fails
+
         existing = self.service.get_species_by_scientific_name(scientific_name)
 
         if existing:
