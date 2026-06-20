@@ -46,3 +46,15 @@ async def get_species_context(
     if not context:
         raise HTTPException(status_code=404, detail="Species not found")
     return context
+
+
+@router.patch("/species/{scientific_name}")
+def update_species(service: SpeciesServiceDep, scientific_name: str, fields: dict) -> dict[str, str]:
+    service.update_species(scientific_name, **fields)
+    return {"status": "updated"}
+
+
+@router.delete("/species/{scientific_name}")
+def delete_species(service: SpeciesServiceDep, scientific_name: str, delete_chunks: bool = True) -> dict[str, str]:
+    service.delete_species(scientific_name, delete_chunks=delete_chunks)
+    return {"status": "deleted"}

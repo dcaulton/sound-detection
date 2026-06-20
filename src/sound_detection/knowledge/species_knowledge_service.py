@@ -196,3 +196,32 @@ class SpeciesKnowledgeService:
         with self.driver.session() as session:
             result = session.run(query, limit=limit)
             return [dict(record) for record in result]
+
+    def update_species(self, scientific_name: str, **fields: dict[str, Any]) -> None:
+        """Update properties on an existing Species node."""
+        if not fields:
+            return
+
+        set_clauses = ", ".join(f"s.{k} = ${k}" for k in fields)
+        query = f"""
+        MATCH (s:Species {{scientific_name: $scientific_name}})
+        SET {set_clauses}
+        """
+        with self.driver.session() as session:
+            session.run(query, scientific_name=scientific_name, **fields)
+
+    def delete_species(self, scientific_name: str, delete_chunks: bool = True) -> None:
+        """Delete a Species node and optionally its associated chunks."""
+        if delete_chunks:
+            query = """
+            MATCH (s:Species {scientific_name: $scientific_name})
+            OPTIONAL MATCH (s)-[:HAS_CHUNK]->(c:Chunk)
+            DETACH DELETE s, c
+            """
+        else:
+            query = """
+            MATCH (s:Species {scientific_name: $scientific_name})
+            DETACH DELETE s
+            """
+        with self.driver.session() as session:
+            session.run(query, scientific_name=scientific_name)

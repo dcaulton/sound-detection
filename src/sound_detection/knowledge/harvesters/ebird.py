@@ -19,19 +19,18 @@ class EbirdHarvester:
         """Fetch basic presence + taxonomy info from eBird for a species."""
         if self.api_key is None:
             return None
-
         try:
-            # Step 1: Get species code from taxonomy
-            species_code = self._get_species_code(scientific_name)
-            if not species_code:
+            species_info = self._get_species_info(scientific_name)
+            if not species_info:
                 logger.warning(f"Species not found in eBird taxonomy: {scientific_name}")
                 return None
 
-            # Step 2: Check if the species has been recorded in Illinois
-            url = f"{self.BASE_URL}/product/spplist/US-IL"
-            headers = {"X-eBirdApiToken": self.api_key}  # type: ignore[arg-type]
-            response = requests.get(url, headers=headers, timeout=15)
+            species_code = species_info["speciesCode"]
 
+            # Check Illinois presence (unchanged)
+            url = f"{self.BASE_URL}/product/spplist/US-IL"
+            headers = {"X-eBirdApiToken": self.api_key}
+            response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 return None
 
@@ -40,26 +39,29 @@ class EbirdHarvester:
 
             return {
                 "scientific_name": scientific_name,
+                "common_name": species_info.get("comName"),
                 "taxon": "Bird",
                 "ebird_species_code": species_code,
                 "recorded_in_illinois": is_in_illinois,
             }
-
         except Exception as e:
             logger.warning(f"eBird fetch failed for {scientific_name}: {e}")
             return None
 
-    def _get_species_code(self, scientific_name: str) -> str | None:
-        """Resolve scientific name to eBird species code."""
+    def _get_species_info(self, scientific_name: str) -> dict | None:
+        """Resolve scientific name to eBird species info (code + common name)."""
         url = f"{self.BASE_URL}/ref/taxonomy/ebird?fmt=json"
-        headers = {"X-eBirdApiToken": self.api_key}
-
-        resp = requests.get(url, headers=headers, timeout=15)  # type: ignore[arg-type]
+        headers: dict[str, str] = {}
+        if self.api_key:
+            headers = {"X-eBirdApiToken": self.api_key}
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code != 200:
             return None
 
         for sp in resp.json():
             if sp.get("sciName") == scientific_name:
-                return str(sp.get("speciesCode"))
-
+                return {
+                    "speciesCode": sp.get("speciesCode"),
+                    "comName": sp.get("comName"),
+                }
         return None

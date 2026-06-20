@@ -34,7 +34,7 @@ class SeedOrUpdate:
         try:
             chunks = self.rag_enricher.retriever.retrieve(scientific_name, top_k=1)
             if chunks and any(c.get("source") == "wikipedia" for c in chunks):
-                logger.info(f"Species {scientific_name} already enriched with Wikipedia chunks. Skipping.")
+                logger.warning(f"Species {scientific_name} already enriched with Wikipedia chunks. Skipping.")
                 return {}
         except Exception:
             pass  # proceed if retrieval check fails

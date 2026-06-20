@@ -6,7 +6,9 @@ from neo4j import Driver
 from .chunking.semantic_chunker import SemanticChunker
 from .embedding import EmbeddingModel
 from .ingestion.pdf import PDFSource
-from .ingestion.wikipedia import WikipediaSource
+from .ingestion.wikipedia_api import WikipediaSource
+
+# from .ingestion.wikipedia import WikipediaSource
 from .vector_store import Neo4jVectorStore
 
 logger = logging.getLogger(__name__)
