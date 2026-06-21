@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sound_detection.db.neo4j import get_neo4j_driver
 from sound_detection.db.session import AsyncSessionLocal
 from sound_detection.knowledge.biome_summary_service import BiomeSummaryService
-from sound_detection.knowledge.rag.retriever import Retriever
 
 router = APIRouter(prefix="/biome", tags=["biome"])
 
@@ -79,6 +78,6 @@ async def delete_summary(
 
 async def run_generate_summary(summary_id: UUID) -> None:
     async with AsyncSessionLocal() as session:
-        retriever = Retriever(get_neo4j_driver())
-        service = BiomeSummaryService(session, retriever)
+        neo4j_driver = get_neo4j_driver()
+        service = BiomeSummaryService(session, neo4j_driver)
         await service.generate_summary(summary_id)
