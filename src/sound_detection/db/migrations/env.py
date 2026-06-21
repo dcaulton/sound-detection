@@ -6,15 +6,15 @@ from sqlmodel import SQLModel
 
 config = context.config
 
-# Safe logging config (won't crash if sections are missing)
 if config.config_file_name is not None:
     try:
         fileConfig(config.config_file_name)
     except Exception:
         pass
 
-# Import your models so autogenerate can see the tables
-from sound_detection.db.models import SQLModel
+# Import your models so Alembic can see them
+from sound_detection.db import models   # This triggers all model imports
+
 target_metadata = SQLModel.metadata
 
 # Override sqlalchemy.url from environment if set (for docker dev + testcontainers)

@@ -2,10 +2,11 @@
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import UUID as SA_UUID
 from sqlalchemy import ForeignKey
-from sqlmodel import Column, Field, Relationship, SQLModel
+from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 
 class Site(SQLModel, table=True):  # type: ignore[call-arg]
@@ -99,3 +100,18 @@ class Detection(SQLModel, table=True):  # type: ignore[call-arg]
         back_populates="detections",
         passive_deletes=True,
     )
+
+
+class BiomeSummary(SQLModel, table=True):
+    __tablename__ = "biome_summaries"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    site_id: uuid.UUID = Field(foreign_key="site.id", index=True)  # ← Multi-tenant key
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    window_days: int = Field(default=30)
+    status: str = Field(default="pending", index=True)  # pending | processing | completed | failed
+
+    summary_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    narrative: str | None = None
+    error_message: str | None = None
