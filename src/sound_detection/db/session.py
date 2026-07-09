@@ -12,8 +12,15 @@ DATABASE_URL = os.getenv("DATABASE_URL", settings.database_url)
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://")
 
-# Async engine only (matching birdseye style)
-async_engine = create_async_engine(DATABASE_URL, echo=settings.debug)
+async_engine = create_async_engine(
+    DATABASE_URL,
+    echo=settings.debug,
+    pool_size=20,
+    max_overflow=40,
+    pool_timeout=30,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+)
 AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False)
 
 

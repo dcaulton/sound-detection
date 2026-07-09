@@ -1,12 +1,15 @@
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
 from sound_detection.db.models import Detection, Microphone, Recording, Site
 from sound_detection.utils.datetime import parse_recording_datetime_from_filename
+
+log = structlog.get_logger()
 
 
 class RecordingRepository:
@@ -27,51 +30,46 @@ class RecordingRepository:
         self, recording_id: UUID, detections: list[dict], duration_seconds: float | None = None
     ) -> None:
         """Save detections and update recording status."""
+        if not detections:
+            return
+
         recording = await self.session.get(Recording, recording_id)
-        if recording:
-            recording.status = "completed"
-            if duration_seconds is not None:
-                recording.duration_seconds = duration_seconds
-            self.session.add(recording)
+        if recording is None:
+            log.warning("Recording not found when saving detections", recording_id=recording_id)
+            return
 
-        # Continue to create detections even if recording wasn't found in this session
-        # (the important part is that detections get saved)
+        recording.status = "completed"
+        if duration_seconds is not None:
+            recording.duration_seconds = duration_seconds
+        self.session.add(recording)
 
-        # Update recording status after successful analysis
-        recording = await self.session.get(Recording, recording_id)
-        if recording is not None:
-            recording.status = "completed"
-            if duration_seconds is not None:
-                recording.duration_seconds = duration_seconds
-            self.session.add(recording)
+        detection_objects: list[Detection] = []
 
-            detection_objects: list[Detection] = []
+        for d in detections:
+            start_offset = d.get("start_time", 0.0)
+            end_offset = d.get("end_time", 0.0)
 
-            for d in detections:
-                start_offset = d.get("start_time", 0.0)
-                end_offset = d.get("end_time", 0.0)
+            start_time = None
+            end_time = None
 
-                start_time = None
-                end_time = None
+            if recording.recorded_at is not None:
+                start_time = recording.recorded_at + timedelta(seconds=start_offset)
+                end_time = recording.recorded_at + timedelta(seconds=end_offset)
 
-                if recording.recorded_at is not None:
-                    start_time = recording.recorded_at + timedelta(seconds=start_offset)
-                    end_time = recording.recorded_at + timedelta(seconds=end_offset)
+            det = Detection(
+                recording_id=recording_id,
+                species=d["species"],
+                common_name=d["common_name"],
+                scientific_name=d["scientific_name"],
+                confidence=d["confidence"],
+                start_offset=start_offset,
+                end_offset=end_offset,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            detection_objects.append(det)
 
-                det = Detection(
-                    recording_id=recording_id,
-                    species=d["species"],
-                    common_name=d["common_name"],
-                    scientific_name=d["scientific_name"],
-                    confidence=d["confidence"],
-                    start_offset=start_offset,
-                    end_offset=end_offset,
-                    start_time=start_time,
-                    end_time=end_time,
-                )
-                detection_objects.append(det)
-
-            self.session.add_all(detection_objects)
+        self.session.add_all(detection_objects)
         await self.session.commit()
 
     async def get_or_create_default_microphone(self) -> Microphone:

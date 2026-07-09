@@ -52,11 +52,11 @@ async def background_analyze(
             await session.close()
 
         # Trigger knowledge enrichment once per new species
-        unique_species = {d.species for d in result.detections}
+        unique_species = {d.scientific_name for d in result.detections}
         for species in unique_species:
             try:
                 seed = SeedOrUpdate(get_neo4j_driver())
-                [seed.seed_or_update(species) for species in unique_species]
+                seed.seed_or_update(species)
             except Exception:
                 log.exception(f"Failed to seed knowledge for species: {species}")
 
