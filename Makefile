@@ -23,7 +23,11 @@ install-tensorflow:
 	@echo "🔧 Installing tensorflow-cpu (lighter, sufficient for BirdNET TFLite)..."
 	uv pip install tensorflow-cpu
 
-dev: install
+dev:
+	@if [ ! -d ".venv" ]; then \
+		echo "🔧 No virtual environment found. Running 'make install' first..."; \
+		$(MAKE) install; \
+	fi
 	DATABASE_URL=postgresql://sound:sound@localhost:5433/sound_detection \
 	uv run uvicorn src.sound_detection.main:app --reload
 
