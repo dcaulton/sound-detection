@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlmodel import func, select
 
+from sound_detection.core.concurrency import analysis_semaphore
 from sound_detection.db.models import Detection, Microphone, Recording
 from sound_detection.db.neo4j import get_neo4j_driver
 from sound_detection.db.repositories import RecordingRepository
@@ -28,44 +29,49 @@ db_dep = Depends(get_db)
 async def background_analyze(
     recording_id: UUID, audio_bytes: bytes, filename: str, session: AsyncSession | None = None
 ) -> None:
-    try:
-        result = await asyncio.to_thread(analyze_audio, audio_bytes=audio_bytes, filename=filename)
+    async with analysis_semaphore:
+        try:
+            log.info("Acquired analysis semaphore", recording_id=recording_id)
 
-        close_session = False
-        if session is None:
-            session = AsyncSessionLocal()
-            close_session = True
+            result = await asyncio.to_thread(analyze_audio, audio_bytes=audio_bytes, filename=filename)
 
-        repo = RecordingRepository(session)
+            close_session = False
+            if session is None:
+                session = AsyncSessionLocal()
+                close_session = True
 
-        # Update recording
-        recording = await session.get(Recording, recording_id)
-        if recording:
-            recording.status = "completed"
-            recording.duration_seconds = getattr(result, "file_duration", None)
-            session.add(recording)
+            repo = RecordingRepository(session)
 
-        await repo.save_detections(recording_id=recording_id, detections=[d.model_dump() for d in result.detections])
+            # Update recording
+            recording = await session.get(Recording, recording_id)
+            if recording:
+                recording.status = "completed"
+                recording.duration_seconds = getattr(result, "file_duration", None)
+                session.add(recording)
 
-        if close_session:
-            await session.commit()
-            await session.close()
+            await repo.save_detections(
+                recording_id=recording_id, detections=[d.model_dump() for d in result.detections]
+            )
 
-        # Trigger knowledge enrichment once per new species
-        unique_species = {d.scientific_name for d in result.detections}
-        for species in unique_species:
-            try:
-                seed = SeedOrUpdate(get_neo4j_driver())
-                seed.seed_or_update(species)
-            except Exception:
-                log.exception(f"Failed to seed knowledge for species: {species}")
+            if close_session:
+                await session.commit()
+                await session.close()
 
-        log.warning(
-            "Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections)
-        )
+            # Trigger knowledge enrichment once per new species
+            unique_species = {d.scientific_name for d in result.detections}
+            for species in unique_species:
+                try:
+                    seed = SeedOrUpdate(get_neo4j_driver())
+                    seed.seed_or_update(species)
+                except Exception:
+                    log.exception(f"Failed to seed knowledge for species: {species}")
 
-    except Exception:
-        log.exception("Background analysis failed", recording_id=recording_id)
+            log.warning(
+                "Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections)
+            )
+
+        except Exception:
+            log.exception("Background analysis failed", recording_id=recording_id)
 
 
 @router.get("/recordings")

@@ -20,6 +20,24 @@ log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 llm = ChatOllama(model="qwen2.5:32b", temperature=0.3)
 
+NON_SPECIES_LABELS = {
+    "power tools",
+    "fireworks",
+    "engine",
+    "human vocal",
+    "gun",
+    "siren",
+    "dog",
+    "cat",
+    "vehicle",
+    "airplane",
+    "helicopter",
+    "chainsaw",
+    "lawn mower",
+    "human non-vocal",
+    # add more as we discover them
+}
+
 
 class BiomeSummaryService:
     def __init__(
@@ -193,27 +211,35 @@ class BiomeSummaryService:
         # Apply sliding-scale filtering
         filtered_species: list[dict] = []
         for name, count in species_counts.items():
+            name_lower = name.lower().strip()
+
+            # 1. Skip known non-species labels
+            if name_lower in NON_SPECIES_LABELS:
+                continue
+
+            # 2. Skip single-observation detections (likely false positives)
+            if count <= 1:
+                continue
+
+            # 3. Optional: require it to look roughly like a scientific name
+            # (contains a space and starts with a capital letter)
+            if " " not in name or not name[0].isupper():
+                continue
+
             context = species_contexts.get(name, {})
-            recorded_in_illinois = context.get("recorded_in_illinois", False)
+            # this is a little too agressive for now, and messes up multitenancy.
+            # TODO: have a user or site setting drive this later
+            # recorded_in_illinois = context.get("recorded_in_illinois", False)
+            # if not recorded_in_illinois:
+            #     continue
 
-            if recorded_in_illinois:
-                keep = True
-            else:
-                if max_count > 100:
-                    keep = count >= 3
-                elif max_count > 50:
-                    keep = count >= 2
-                else:
-                    keep = count >= 1
-
-            if keep:
-                filtered_species.append(
-                    {
-                        "scientific_name": name,
-                        "count": count,
-                        "context": context,
-                    }
-                )
+            filtered_species.append(
+                {
+                    "scientific_name": name,
+                    "count": count,
+                    "context": context,
+                }
+            )
 
         log.info(
             f"[{summary.id}] After filtering: {len(filtered_species)} species kept "
