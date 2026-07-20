@@ -3,6 +3,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sound_detection.db.neo4j import get_neo4j_driver
@@ -81,3 +82,27 @@ async def run_generate_summary(summary_id: UUID) -> None:
         neo4j_driver = get_neo4j_driver()
         service = BiomeSummaryService(session, neo4j_driver)
         await service.generate_summary(summary_id)
+
+
+@router.get("/summaries/{summary_id}/export")
+async def export_summary(
+    summary_id: UUID,
+    service: Annotated[BiomeSummaryService, Depends(get_biome_service)],
+    format: str = Query("docx", pattern="^(docx|pdf)$"),
+) -> FileResponse:
+    summary = await service.get_summary(summary_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="Summary not found")
+
+    if summary["status"] != "completed":
+        raise HTTPException(status_code=400, detail="Summary is not completed yet")
+
+    if format == "docx":
+        file_path = await service.export_to_docx(summary)
+        return FileResponse(
+            path=file_path,
+            filename=f"biome_summary_{summary_id}.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    else:
+        raise HTTPException(status_code=501, detail="PDF export not implemented yet")
