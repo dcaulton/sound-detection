@@ -37,8 +37,14 @@ async def test_generate_summary_happy_path(async_session: AsyncSession) -> None:
         "This is a long, detailed generated narrative for the biome summary report."
     )
 
+    mock_human_chain = AsyncMock()
+    mock_human_chain.ainvoke.return_value = (
+        "This is a human-readable markdown report with headings and a species table."
+    )
+
     service._build_species_enrichment_chain = MagicMock(return_value=mock_enrichment_chain)  # type: ignore[method-assign]
     service._build_narrative_chain = MagicMock(return_value=mock_narrative_chain)  # type: ignore[method-assign]
+    service._build_human_narrative_chain = MagicMock(return_value=mock_human_chain)  # type: ignore[method-assign]
 
     # Run
     await service.generate_summary(summary.id)

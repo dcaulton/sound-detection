@@ -121,6 +121,11 @@ class BiomeSummary(SQLModel, table=True):
         sa_column=Column(JSON, nullable=True),
     )
 
+    species_table: list[dict[str, Any]] | None = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+
     grok_narrative: str | None = Field(default=None, nullable=True)
 
     error_message: str | None = None

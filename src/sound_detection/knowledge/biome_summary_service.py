@@ -1,14 +1,16 @@
 import logging
+import math
 import os
 import tempfile
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import Any, TypedDict
 from uuid import UUID
 
 import requests
 from docx import Document
+from docx.document import Document as DocumentObject
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt, RGBColor
 from langchain_core.output_parsers import StrOutputParser
@@ -76,6 +78,26 @@ SPECIES_GROUPS = {
     "cynanthus": "hummingbird",
 }
 
+HIGH_INTEREST_SPECIES = {
+    "tympanuchus cupido",
+    "tympanuchus pallidicinctus",
+    "bartramia longicauda",
+    "dolichonyx oryzivorus",
+    "sturnella magna",
+    "sturnella neglecta",
+    "circus hudsonius",
+    "asio flammeus",
+}
+
+
+class ScoredSpecies(TypedDict):
+    scientific_name: str
+    common_name: str
+    count: int
+    score: float
+    group: str | None
+    context: dict[str, Any]
+
 
 def get_species_image(scientific_name: str) -> str | None:
     """
@@ -104,6 +126,103 @@ def get_species_group(scientific_name: str) -> str | None:
     return SPECIES_GROUPS.get(genus)
 
 
+def score_species(
+    scientific_name: str,
+    count: int,
+    context: dict[str, Any] | None = None,
+    current_month: int | None = None,
+) -> float:
+    """
+    Deterministic interestingness score.
+    Higher = more worth highlighting in the summary.
+    """
+    context = context or {}
+    name_lower = scientific_name.lower()
+    score = 0.0
+
+    if current_month is None:
+        current_month = datetime.now().month
+
+    # 1. Frequency (log scale, capped)
+    score += min(math.log1p(count) * 2.5, 12.0)
+
+    # 2. Special groups
+    group = get_species_group(scientific_name)
+    if group == "owl":
+        score += 9.0
+    elif group == "raptor":
+        score += 8.0
+    elif group == "hummingbird":
+        score += 7.0
+
+    # 3. Explicit high-interest / indicator list
+    if name_lower in HIGH_INTEREST_SPECIES:
+        score += 14.0
+
+    # 4. Residency / expected presence
+    if context.get("recorded_in_illinois") is False:
+        score += 6.0
+
+    residency = (context.get("residency_status") or "").lower()
+    if any(k in residency for k in ("vagrant", "rare", "accidental")):
+        score += 5.0
+    if "migrant" in residency:
+        score += 2.0
+
+    # 5. Seasonality - unexpected for current month
+    peak_months: list[int] = context.get("migration_peak_months") or context.get("peak_months") or []
+    if peak_months and current_month not in peak_months:
+        # Present outside its normal peak window
+        score += 4.0
+
+    # 6. Indicator flag from Neo4j
+    if context.get("is_indicator") or context.get("indicator_for_habitats"):
+        score += 7.0
+
+    return round(score, 2)
+
+
+def bucket_species(
+    species_counts: dict[str, int],
+    species_contexts: dict[str, dict[str, Any]],
+    current_month: int | None = None,
+) -> dict[str, list[ScoredSpecies]]:
+    scored: list[ScoredSpecies] = []
+    for name, count in species_counts.items():
+        if count <= 1:
+            continue
+
+        context = species_contexts.get(name, {})
+        score = score_species(name, count, context, current_month)
+        common_name = context.get("common_name") or ""
+
+        scored.append(
+            {
+                "scientific_name": name,
+                "common_name": common_name,
+                "count": count,
+                "score": score,
+                "group": get_species_group(name),
+                "context": context,
+            }
+        )
+
+    by_score = sorted(scored, key=lambda x: x["score"], reverse=True)
+    by_count = sorted(scored, key=lambda x: x["count"], reverse=True)
+
+    return {
+        "table_rows": by_count,
+        "high_interest": [s for s in by_score if s["score"] >= 12][:12],
+        "raptors_owls_hummingbirds": [s for s in by_score if s["group"] in ("owl", "raptor", "hummingbird")],
+        "rare_vagrant": [
+            s
+            for s in by_score
+            if s["count"] <= 4 and (s["context"].get("recorded_in_illinois") is False or s["score"] >= 10)
+        ][:10],
+        "dominant": by_count[:8],
+    }
+
+
 class BiomeSummaryService:
     def __init__(
         self,
@@ -117,6 +236,45 @@ class BiomeSummaryService:
         # Create SpeciesKnowledgeService only if we have a driver
         self.species_service = SpeciesKnowledgeService(neo4j_driver) if neo4j_driver else None
         self.retriever = Retriever(neo4j_driver) if neo4j_driver else None
+
+    def _build_human_narrative_chain(self) -> Runnable:
+        prompt = ChatPromptTemplate.from_template(
+            """You are an experienced field naturalist writing a clear, engaging summary for a 
+               homeowner or land steward.
+
+    Write a well-structured markdown report using headings and short paragraphs.
+
+    **Structure to follow:**
+    1. Overall soundscape - what was actually common and dominant
+    2. Raptors, owls and hummingbirds - comment on diversity when present
+    3. High-interest and indicator species
+    4. Rare or unexpected species
+    5. Brief ecological observations and closing
+
+    **Important:**
+    - Balance common/dominant species with rare and high-interest ones.
+    - Use both common and scientific names.
+    - Keep the tone knowledgeable but accessible. Aim for 700-1000 words.
+
+    **Data**
+    Time window: last {window_days} days
+    Total species detected: {total_species}
+
+    **Dominant / most frequent species**
+    {dominant_text}
+
+    **High-interest & indicator species**
+    {high_interest_text}
+
+    **Rare / unexpected species**
+    {rare_text}
+
+    **Special Groups**
+    {group_highlight}
+
+    Human-readable report:"""
+        )
+        return prompt | llm | StrOutputParser()
 
     async def create_summary_job(self, site_id: UUID, window_days: int = 30) -> UUID:
         """Creates a pending summary job and returns the ID immediately."""
@@ -160,12 +318,16 @@ class BiomeSummaryService:
             # === Phase 3: Narrative Generation ===
             log.info(f"[{summary_id}] Phase 3: Generating final narrative...")
             phase_start = datetime.now(UTC)
-            machine_narrative, human_narrative, images = await self._generate_narratives(
-                summary_id, species_counts, enriched_species, summary.window_days
+            machine_narrative, human_narrative, images, species_table = await self._generate_narratives(
+                summary_id=summary.id,
+                species_counts=species_counts,
+                enriched_species=enriched_species,
+                window_days=summary.window_days,
             )
             summary.narrative = machine_narrative
             summary.human_narrative = human_narrative
             summary.notable_species_images = images
+            summary.species_table = species_table  # type: ignore[assignment]
             log.info(f"[{summary_id}] Phase 3 completed in {(datetime.now(UTC) - phase_start).seconds}s")
 
             # Save final results
@@ -224,6 +386,7 @@ class BiomeSummaryService:
             "narrative": summary.narrative,  # existing (Weathervane)
             "human_narrative": summary.human_narrative,  # new pretty version
             "notable_species_images": summary.notable_species_images or [],
+            "species_table": summary.species_table or [],
             "grok_narrative": summary.grok_narrative,  # optional high-powered version
             "error_message": summary.error_message,
         }
@@ -412,83 +575,65 @@ class BiomeSummaryService:
 
     def _build_narrative_chain(self) -> Runnable:
         prompt = ChatPromptTemplate.from_template(
-            """You are an experienced field ecologist and naturalist writing a detailed monthly biome 
-               report for a specific location (a yard or small site in Illinois).
+            """You are an expert ornithologist and ecologist producing a concise, structured summary of 
+           acoustic detections for downstream automated systems (Weathervane and similar tools).
 
-    **Report Context**
-    - Time window: Last {window_days} days
-    - Total species detected: {total_species}
-    - Top species by detection count: {top_species}
+Write a clear, information-dense report. Use short paragraphs and bullet points where helpful. Avoid fluff.
 
-    **Notable / Enriched Species**
-    {notable_species_text}
+**Required content:**
+- Overall activity level and the dominant (most frequently detected) species
+- Any notable diversity in owls, raptors, or hummingbirds
+- High-interest or indicator species that stand out
+- Brief mention of rare or unexpected species
+- One or two ecological observations worth tracking
 
-    **Task**
-    Write a rich, engaging narrative report (minimum 1000 words) with the following structure:
+**Data**
+Time window: last {window_days} days
+Total species detected: {total_species}
 
-    1. **Overall Summary** - Give a high-level overview of bird activity during this period. 
-       How does it compare to what one might expect?
+Dominant species:
+{dominant_text}
 
-    2. **Seasonal & Ecological Context** - Discuss any species that appear to be at peak numbers 
-       for understandable reasons (migration timing, breeding season, food availability, etc.).
+High-interest / indicator species:
+{high_interest_text}
 
-    3. **Notable & Unusual Sightings** - Highlight species that are uncommon or surprising for 
-       this location. Use the enriched information provided. Explain why they might be here and 
-       what makes them interesting.
+Rare / unexpected species:
+{rare_text}
 
-    4. **Ecological Insights** - Weave in relevant details from the species data (diet, habitat, 
-       behavior, interesting facts).  Connect observations to broader ecological patterns where 
-       appropriate.
+Special groups:
+{group_highlight}
 
-    5. **Reflections & Closing** - End with thoughtful observations or questions the data raises.
-
-    Write in a natural, knowledgeable tone - like a field report written by someone who knows 
-    the local avifauna well. 
-    Be specific and use the provided data. Avoid generic statements.
-
-    Narrative:"""
+Structured summary:"""
         )
+        return prompt | llm | StrOutputParser()
 
-        chain = prompt | llm | StrOutputParser()
-        return chain
+    def _add_species_table(self, doc: DocumentObject, table_rows: list[ScoredSpecies]) -> None:
+        """Add a properly formatted Word table."""
+        if not table_rows:
+            doc.add_paragraph("No species with more than one detection.")
+            return
 
-    async def _generate_narrative(
-        self,
-        summary_id: UUID,
-        species_counts: dict[str, int],
-        enriched_species: list[dict],
-        window_days: int,
-    ) -> str:
-        log.info(f"[{summary_id}] Generating long-form narrative...")
+        table = doc.add_table(rows=1, cols=4)
+        table.style = "Table Grid"
 
-        # Prepare top species list
-        sorted_species = sorted(species_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-        top_species_text = ", ".join(f"{name} ({count})" for name, count in sorted_species)
+        # Header
+        headers = ["Common Name", "Scientific Name", "Detections", "Score"]
+        header_cells = table.rows[0].cells
+        for i, text in enumerate(headers):
+            header_cells[i].text = text
+            for paragraph in header_cells[i].paragraphs:
+                for run in paragraph.runs:
+                    run.bold = True
 
-        # Prepare notable species section
-        notable_text_parts = []
-        for sp in enriched_species:
-            name = sp["scientific_name"]
-            count = sp["count"]
-            insight = sp.get("llm_insight") or "No additional insight generated."
-            notable_text_parts.append(f"**{name}** ({count} detections):\n{insight}")
+        # Data rows
+        for row in table_rows:
+            cells = table.add_row().cells
+            cells[0].text = row.get("common_name") or "—"
+            cells[1].text = row.get("scientific_name") or ""
+            cells[2].text = str(row.get("count", ""))
+            cells[3].text = str(row.get("score", ""))
 
-        notable_species_text = "\n\n".join(notable_text_parts)
-
-        chain = self._build_narrative_chain()
-
-        log.info(f"[{summary_id}] Sending narrative generation request to LLM...")
-        narrative: str = await chain.ainvoke(
-            {
-                "window_days": window_days,
-                "total_species": len(species_counts),
-                "top_species": top_species_text,
-                "notable_species_text": notable_species_text,
-            }
-        )
-
-        log.info(f"[{summary_id}] Narrative generated ({len(narrative)} characters)")
-        return narrative.strip()
+        doc.add_paragraph()  # spacer
 
     async def export_to_docx(self, summary: dict) -> Path:
         """
@@ -532,6 +677,12 @@ class BiomeSummaryService:
                 doc.add_heading(text, level=level)
             else:
                 doc.add_paragraph(block)
+
+        # ----- Species Table -----
+        doc.add_heading("Species Detected (more than one detection)", level=1)
+
+        table_rows = summary.get("species_table") or []
+        self._add_species_table(doc, table_rows)
 
         # ---------- Notable Species with Images ----------
         images = summary.get("notable_species_images") or []
@@ -583,105 +734,97 @@ class BiomeSummaryService:
         species_counts: dict[str, int],
         enriched_species: list[dict],
         window_days: int,
-    ) -> tuple[str, str, list[dict]]:
+    ) -> tuple[str, str, list[dict[str, Any]], list[ScoredSpecies]]:
+        """
+        Returns:
+            (machine_narrative, human_narrative, notable_species_images, species_table)
+        """
         log.info(f"[{summary_id}] Generating narratives...")
 
-        # ----- Group analysis (owls, raptors, hummingbirds) -----
-        group_counts = defaultdict(list)
-        for name, count in species_counts.items():
-            group = get_species_group(name)
-            if group:
-                group_counts[group].append((name, count))
-
-        group_summary_parts = []
-        if group_counts.get("owl"):
-            owls = group_counts["owl"]
-            group_summary_parts.append(f"Owls: {len(owls)} species detected ({', '.join(n for n, _ in owls)})")
-        if group_counts.get("raptor"):
-            raptors = group_counts["raptor"]
-            group_summary_parts.append(f"Raptors: {len(raptors)} species detected ({', '.join(n for n, _ in raptors)})")
-        if group_counts.get("hummingbird"):
-            hummers = group_counts["hummingbird"]
-            group_summary_parts.append(
-                f"Hummingbirds: {len(hummers)} species detected ({', '.join(n for n, _ in hummers)})"
-            )
-
-        group_highlight = (
-            "\n".join(group_summary_parts)
-            if group_summary_parts
-            else "No major raptor, owl, or hummingbird diversity noted."
-        )
-
-        # ----- Shared context -----
-        sorted_species = sorted(species_counts.items(), key=lambda x: x[1], reverse=True)
-        top_species_text = ", ".join(f"{name} ({count})" for name, count in sorted_species[:10])
-
-        notable_text_parts = []
+        # ----- Build context lookup -----
+        species_contexts: dict[str, dict] = {}
         for sp in enriched_species:
             name = sp["scientific_name"]
-            count = sp["count"]
-            insight = sp.get("llm_insight") or "No additional insight."
-            notable_text_parts.append(f"**{name}** ({count} detections):\n{insight}")
+            species_contexts[name] = sp.get("context") or {}
 
-        notable_species_text = "\n\n".join(notable_text_parts)
+        # Ensure every counted species has at least an empty context
+        for name in species_counts:
+            species_contexts.setdefault(name, {})
 
-        # Common variables for both prompts
+        # ----- Score & bucket -----
+        buckets = bucket_species(species_counts, species_contexts)
+
+        # ----- Group highlight (now driven by buckets) -----
+        group_parts = []
+
+        for group_key, label in [("owl", "Owls"), ("raptor", "Raptors"), ("hummingbird", "Hummingbirds")]:
+            members = [r for r in buckets["raptors_owls_hummingbirds"] if r["group"] == group_key]
+            if not members:
+                continue
+            names = []
+            for m in members:
+                common = m["common_name"] or ""
+                sci = m["scientific_name"]
+                if common:
+                    names.append(f"{common} (*{sci}*)")
+                else:
+                    names.append(f"*{sci}*")
+            group_parts.append(f"{label}: {len(members)} species ({', '.join(names)})")
+
+        group_highlight = (
+            "\n".join(group_parts) if group_parts else "No major raptor, owl, or hummingbird diversity noted."
+        )
+
+        # ----- High-interest & dominant text for the prompt -----
+        def format_species_list(rows: list[ScoredSpecies], limit: int = 8) -> str:
+            parts = []
+            for r in rows[:limit]:
+                common = r["common_name"] or ""
+                label = f"{common} (*{r['scientific_name']}*)" if common else f"*{r['scientific_name']}*"
+                parts.append(f"- {label}: {r['count']} detections (score {r['score']})")
+            return "\n".join(parts) if parts else "None"
+
+        high_interest_text = format_species_list(buckets["high_interest"])
+        dominant_text = format_species_list(buckets["dominant"])
+        rare_text = format_species_list(buckets["rare_vagrant"])
+
+        # ----- Shared prompt variables -----
         prompt_vars = {
             "window_days": window_days,
             "total_species": len(species_counts),
-            "top_species": top_species_text,
-            "notable_species_text": notable_species_text,
             "group_highlight": group_highlight,
+            "high_interest_text": high_interest_text,
+            "dominant_text": dominant_text,
+            "rare_text": rare_text,
         }
 
-        # ----- Machine / Weathervane narrative -----
+        # ----- Machine narrative (keep relatively simple) -----
         machine_chain = self._build_narrative_chain()
         machine_narrative = await machine_chain.ainvoke(prompt_vars)
 
         # ----- Human-readable narrative -----
-        human_prompt = ChatPromptTemplate.from_template(
-            """You are an experienced field naturalist writing a clear, engaging summary for a 
-               homeowner or land steward.
-
-    Write a well-structured markdown report (use headings, bullet points, and short paragraphs).
-
-    **Important instructions:**
-    - Start with the overall picture of bird activity (including the most frequently detected species).
-    - Explicitly comment on any notable diversity in raptors, owls, or hummingbirds when present.
-    - Balance discussion of rare/unusual species with the common and dominant ones.
-    - Mention ecological significance where relevant (habitat quality, predator presence, seasonal patterns, etc.).
-    - Keep the tone knowledgeable but accessible. Aim for 600 to 900 words.
-
-    **Data**
-    Time window: last {window_days} days
-    Total species detected: {total_species}
-    Most frequently detected species: {top_species}
-
-    Notable / enriched species details:
-    {notable_species_text}
-
-    **Special Groups Detected**
-    {group_highlight}
-
-    Human-readable report:"""
-        )
-
-        human_chain = human_prompt | llm | StrOutputParser()
+        human_chain = self._build_human_narrative_chain()
         human_narrative = await human_chain.ainvoke(prompt_vars)
 
-        # ----- Images for top notable species -----
+        # ----- Images (prefer high-interest species) -----
         notable_species_images = []
-        for sp in enriched_species[:5]:
+        image_candidates: list[Any] = buckets["high_interest"] or buckets["dominant"]
+        for sp in image_candidates[:5]:
             name = sp["scientific_name"]
             image_url = get_species_image(name)
             if image_url:
                 notable_species_images.append(
                     {
                         "scientific_name": name,
-                        "common_name": sp.get("context", {}).get("common_name"),
+                        "common_name": sp.get("common_name"),
                         "count": sp["count"],
                         "image_url": image_url,
                     }
                 )
 
-        return machine_narrative.strip(), human_narrative.strip(), notable_species_images
+        return (
+            machine_narrative.strip(),
+            human_narrative.strip(),
+            notable_species_images,
+            buckets["table_rows"],
+        )
