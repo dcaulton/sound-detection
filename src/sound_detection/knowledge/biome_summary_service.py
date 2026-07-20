@@ -18,6 +18,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 from neo4j import Driver
+from PIL import Image as PILImage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,21 +101,29 @@ class ScoredSpecies(TypedDict):
 
 
 def get_species_image(scientific_name: str) -> str | None:
-    """
-    Try to get a representative image URL for a species.
-    Uses Wikipedia first (simple and reliable).
-    """
     try:
-        # Wikipedia API - get page summary which includes a thumbnail
-        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{scientific_name.replace(' ', '_')}"
-        resp = requests.get(url, timeout=5)
+        title = scientific_name.replace(" ", "_")
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+
+        headers = {
+            "User-Agent": "sound-detection/0.2 (https://github.com/dcaulton/sound-detection; bioacoustics research)"
+        }
+
+        log.info(f"Fetching image for {scientific_name} → {url}")
+        resp = requests.get(url, headers=headers, timeout=8)
+        log.info(f"  status={resp.status_code}")
+
         if resp.status_code == 200:
             data = resp.json()
-            thumbnail = data.get("thumbnail", {}).get("source")
-            if thumbnail:
-                return str(thumbnail)
-    except Exception:
-        pass
+            thumb = str(data.get("thumbnail", {}).get("source"))
+            log.info(f"  thumbnail={thumb}")
+            return thumb
+        else:
+            log.warning(f"  non-200 response fetching image for {scientific_name} (status={resp.status_code})")
+            # Optional: log a bit of the body for debugging
+            # log.warning(f"  body={resp.text[:200]}")
+    except Exception as e:
+        log.exception(f"Image fetch failed for {scientific_name}: {e}")
     return None
 
 
@@ -684,10 +693,14 @@ Structured summary:"""
         table_rows = summary.get("species_table") or []
         self._add_species_table(doc, table_rows)
 
-        # ---------- Notable Species with Images ----------
+        # ----- Notable Species with Images -----
         images = summary.get("notable_species_images") or []
         if images:
             doc.add_heading("Notable Species", level=1)
+
+            headers = {
+                "User-Agent": "sound-detection/0.2 (https://github.com/dcaulton/sound-detection; bioacoustics research)"
+            }
 
             for item in images:
                 name = item.get("scientific_name", "Unknown")
@@ -695,24 +708,38 @@ Structured summary:"""
                 count = item.get("count", "?")
                 image_url = item.get("image_url")
 
-                # Caption
                 caption = f"{common} ({name})" if common else name
                 caption += f"  —  {count} detections"
                 doc.add_heading(caption, level=2)
 
-                # Try to embed the image
                 if image_url:
                     try:
-                        resp = requests.get(image_url, timeout=8)
-                        if resp.status_code == 200:
-                            image_stream = BytesIO(resp.content)
-                            doc.add_picture(image_stream, width=Inches(3.5))
-                            last_paragraph = doc.paragraphs[-1]
-                            last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    except Exception as e:
-                        doc.add_paragraph(f"[Could not load image: {e}]")
+                        resp = requests.get(image_url, headers=headers, timeout=10)
+                        if resp.status_code != 200:
+                            doc.add_paragraph(f"[Image unavailable - HTTP {resp.status_code}]")
+                            continue
 
-                doc.add_paragraph()  # spacer between species
+                        # Convert to a format python-docx understands (JPEG)
+                        image_stream = BytesIO(resp.content)
+                        with PILImage.open(image_stream) as img:
+                            # Convert palette/RGBA images etc. to RGB
+                            if img.mode in ("RGBA", "P", "LA"):
+                                img = img.convert("RGB")  # type: ignore[assignment]
+                            elif img.mode != "RGB":
+                                img = img.convert("RGB")  # type: ignore[assignment]
+
+                            output = BytesIO()
+                            img.save(output, format="JPEG", quality=85)
+                            output.seek(0)
+
+                            doc.add_picture(output, width=Inches(3.5))
+                            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                    except Exception as e:
+                        doc.add_paragraph(f"[Could not load image: {type(e).__name__}: {e}]")
+                        log.exception(f"Failed to embed image {image_url}")
+
+                doc.add_paragraph()
 
         # ---------- Footer ----------
         doc.add_paragraph()
@@ -828,3 +855,135 @@ Structured summary:"""
             notable_species_images,
             buckets["table_rows"],
         )
+
+    async def build_grok_data_package(self, summary_id: UUID) -> str | None:
+        """
+        Build a clean, paste-ready markdown package of the summary data
+        for use with a stronger external model (Grok, etc.).
+        """
+        summary = await self.session.get(BiomeSummary, summary_id)
+        if not summary or summary.status != "completed":
+            return None
+
+        table: list[dict] = summary.species_table or []
+        if not table:
+            return "No species table available for this summary."
+
+        # Re-derive the useful buckets from the stored table
+        by_score = sorted(table, key=lambda x: x.get("score", 0), reverse=True)
+        by_count = sorted(table, key=lambda x: x.get("count", 0), reverse=True)
+
+        dominant = by_count[:8]
+        high_interest = [s for s in by_score if s.get("score", 0) >= 12][:10]
+        group_members = [s for s in by_score if s.get("group") in ("owl", "raptor", "hummingbird")]
+        rare = [s for s in by_score if s.get("count", 0) <= 4 and s.get("score", 0) >= 10][:8]
+
+        def fmt(rows: list[dict]) -> str:
+            if not rows:
+                return "_None_"
+            lines = []
+            for r in rows:
+                common = r.get("common_name") or "—"
+                sci = r.get("scientific_name", "")
+                count = r.get("count", "?")
+                score = r.get("score", "?")
+                lines.append(f"- {common} (*{sci}*): {count} detections (score {score})")
+            return "\n".join(lines)
+
+        # Group highlight
+        group_lines = []
+        for key, label in [("owl", "Owls"), ("raptor", "Raptors"), ("hummingbird", "Hummingbirds")]:
+            members = [s for s in group_members if s.get("group") == key]
+            if members:
+                names = [
+                    f"{s.get('common_name') or s.get('scientific_name')} (*{s.get('scientific_name')}*)"
+                    for s in members
+                ]
+                group_lines.append(f"- {label} ({len(members)}): {', '.join(names)}")
+        group_highlight = "\n".join(group_lines) if group_lines else "- None noted"
+
+        package = f"""# Biome Summary Data Package
+    Site ID: {summary.site_id}
+    Window: last {summary.window_days} days
+    Generated: {summary.created_at.isoformat() if summary.created_at else "unknown"}
+    Total species with >1 detection: {len(table)}
+
+    ## Dominant / Most Frequent Species
+    {fmt(dominant)}
+
+    ## High-Interest & Indicator Species
+    {fmt(high_interest)}
+
+    ## Raptors, Owls & Hummingbirds
+    {group_highlight}
+
+    ## Rare / Unexpected Species
+    {fmt(rare)}
+
+    ## Full Species Table (count > 1)
+    | Common Name | Scientific Name | Detections | Score |
+    |-------------|-----------------|------------|-------|
+    """
+        for r in by_count:
+            common = r.get("common_name") or "—"
+            sci = r.get("scientific_name", "")
+            package += f"| {common} | {sci} | {r.get('count', '')} | {r.get('score', '')} |\n"
+
+        package += """
+    ---
+    Instructions for the model:
+    You are an experienced field naturalist and ecologist. Using only the data above, write a clear, engaging, 
+    well-structured markdown report for a homeowner / land steward in the Chicago suburbs / prairie restoration 
+    context. Balance the common soundscape with high-interest, indicator, raptor/owl, and rare species. Use 
+    both common and scientific names. Aim for 700-1000 words.
+    """
+        return package
+
+    async def update_grok_narrative(self, summary_id: UUID, text: str) -> bool:
+        summary = await self.session.get(BiomeSummary, summary_id)
+        if not summary:
+            return False
+
+        summary.grok_narrative = text
+        self.session.add(summary)
+        await self.session.commit()
+        return True
+
+    async def backfill_images(self, summary_id: UUID) -> dict | None:
+        summary = await self.session.get(BiomeSummary, summary_id)
+        if not summary:
+            return None
+
+        candidates = summary.species_table or []
+        candidates = sorted(
+            candidates,
+            key=lambda x: x.get("score", 0),
+            reverse=True,
+        )[:8]
+
+        images = []
+        for sp in candidates:
+            name = sp.get("scientific_name")
+            if not name:
+                continue
+            image_url = get_species_image(name)
+            if image_url:
+                images.append(
+                    {
+                        "scientific_name": name,
+                        "common_name": sp.get("common_name"),
+                        "count": sp.get("count"),
+                        "image_url": image_url,
+                    }
+                )
+
+        summary.notable_species_images = images
+        self.session.add(summary)
+        await self.session.commit()
+        await self.session.refresh(summary)
+
+        return {
+            "summary_id": str(summary.id),
+            "images_found": len(images),
+            "notable_species_images": images,
+        }

@@ -2,8 +2,8 @@ from collections.abc import AsyncGenerator
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sound_detection.db.neo4j import get_neo4j_driver
@@ -106,3 +106,52 @@ async def export_summary(
         )
     else:
         raise HTTPException(status_code=501, detail="PDF export not implemented yet")
+
+
+@router.get("/summaries/{summary_id}/grok-package", response_class=PlainTextResponse)
+async def get_grok_data_package(
+    summary_id: UUID,
+    service: Annotated[BiomeSummaryService, Depends(get_biome_service)],
+) -> str | None:
+    package = await service.build_grok_data_package(summary_id)
+    if package is None:
+        raise HTTPException(status_code=404, detail="Summary not found or not completed")
+    return package
+
+
+@router.put("/summaries/{summary_id}/grok-narrative", response_class=PlainTextResponse)
+async def update_grok_narrative(
+    summary_id: UUID,
+    request: Request,
+    service: Annotated[BiomeSummaryService, Depends(get_biome_service)],
+) -> str:
+    """
+    Accept raw markdown/text and store it as the Grok narrative.
+    Content-Type: text/plain
+    """
+    body = await request.body()
+    text = body.decode("utf-8").strip()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty body")
+
+    updated = await service.update_grok_narrative(summary_id, text)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Summary not found")
+
+    return "OK"
+
+
+@router.post("/summaries/{summary_id}/backfill-images")
+async def backfill_summary_images(
+    summary_id: UUID,
+    service: Annotated[BiomeSummaryService, Depends(get_biome_service)],
+) -> dict | None:
+    """
+    Debug endpoint: re-fetch images for species in an existing summary
+    and update notable_species_images.
+    """
+    result = await service.backfill_images(summary_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Summary not found")
+    return result
