@@ -17,7 +17,8 @@ from sound_detection.db.neo4j import get_neo4j_driver
 from sound_detection.db.repositories import RecordingRepository
 from sound_detection.db.session import AsyncSessionLocal, get_db
 from sound_detection.knowledge.seed_or_update import SeedOrUpdate
-from sound_detection.ml.inference import analyze_audio
+from sound_detection.ml.inference import analyze_with_birdnet
+from sound_detection.ml.perch_inference import analyze_with_perch
 from sound_detection.schemas.detection import AnalyzeAudioRequest
 from sound_detection.utils.datetime import parse_recording_datetime_from_filename
 
@@ -33,32 +34,37 @@ async def background_analyze(
         try:
             log.info("Acquired analysis semaphore", recording_id=recording_id)
 
-            result = await asyncio.to_thread(analyze_audio, audio_bytes=audio_bytes, filename=filename)
-
             close_session = False
             if session is None:
                 session = AsyncSessionLocal()
                 close_session = True
-
             repo = RecordingRepository(session)
+
+            perch_response = await asyncio.to_thread(analyze_with_perch, audio_bytes=audio_bytes, filename=filename)
+            await repo.save_detections(recording_id=recording_id, detections=perch_response.detections)
+            log.info("Perch analysis complete", detections_found=len(perch_response.detections))
+
+            birdnet_response = await asyncio.to_thread(analyze_with_birdnet, audio_bytes=audio_bytes, filename=filename)
+            await repo.save_detections(recording_id=recording_id, detections=birdnet_response.detections)
+            log.info("Birdnet analysis complete", detections_found=len(birdnet_response.detections))
 
             # Update recording
             recording = await session.get(Recording, recording_id)
+
             if recording:
                 recording.status = "completed"
-                recording.duration_seconds = getattr(result, "file_duration", None)
+                recording.duration_seconds = getattr(birdnet_response, "file_duration", None)
                 session.add(recording)
-
-            await repo.save_detections(
-                recording_id=recording_id, detections=[d.model_dump() for d in result.detections]
-            )
 
             if close_session:
                 await session.commit()
                 await session.close()
 
+            log.info("Recording updated to complete")
+
             # Trigger knowledge enrichment once per new species
-            unique_species = {d.scientific_name for d in result.detections}
+            unique_species = {d.scientific_name for d in birdnet_response.detections}
+            unique_species |= {d.scientific_name for d in perch_response.detections}
             for species in unique_species:
                 try:
                     seed = SeedOrUpdate(get_neo4j_driver())
@@ -66,9 +72,9 @@ async def background_analyze(
                 except Exception:
                     log.exception(f"Failed to seed knowledge for species: {species}")
 
-            log.warning(
-                "Background analysis complete and saved", recording_id=recording_id, detections=len(result.detections)
-            )
+            # TODO update interesting score and confirmed_group_id for new detections
+
+            log.warning("Background analysis complete and saved", recording_id=recording_id)
 
         except Exception:
             log.exception("Background analysis failed", recording_id=recording_id)
@@ -77,6 +83,7 @@ async def background_analyze(
 @router.get("/recordings")
 async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query(50, le=100)) -> list[dict]:  # noqa: B008
     """List recent recordings."""
+    # TODO move this to the repository
     result = await db.execute(
         select(Recording)
         .options(selectinload(Recording.detections))  # type: ignore[arg-type]
@@ -91,16 +98,6 @@ async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query
             "status": r.Recording.status,
             "uploaded_at": r.Recording.uploaded_at.isoformat() if r.Recording.uploaded_at else None,
             "detections_count": len(r.Recording.detections) if hasattr(r.Recording, "detections") else 0,
-            "detections": [
-                {
-                    "species": d.species,
-                    "common_name": d.common_name,
-                    "confidence": d.confidence,
-                    "start_time": d.start_time,
-                    "end_time": d.end_time,
-                }
-                for d in getattr(r.Recording, "detections", [])
-            ],
             "microphone_id": r.Recording.microphone_id,
         }
         for r in recordings
@@ -111,10 +108,28 @@ async def list_recordings(db: AsyncSession = Depends(get_db), limit: int = Query
 async def get_recording(recording_id: UUID, db: AsyncSession = db_dep) -> dict:
     """Get a recording with its detections."""
     repo = RecordingRepository(db)
-    recording = await repo.get(recording_id)
-    if not recording:
+    r = await repo.get(recording_id)
+    log.info("donkey", recording=r)
+    if not r:
         raise HTTPException(404, "Recording not found")
-    return {"id": str(recording.id), "status": recording.status}
+    return {
+        "id": str(r.id),
+        "filename": r.filename,
+        "status": r.status,
+        "uploaded_at": r.uploaded_at.isoformat() if r.uploaded_at else None,
+        "detections_count": len(r.detections) if hasattr(r, "detections") else 0,
+        "detections": [
+            {
+                "species": d.species,
+                "common_name": d.common_name,
+                "confidence": d.confidence,
+                "start_time": d.start_time,
+                "end_time": d.end_time,
+            }
+            for d in getattr(r, "detections", [])
+        ],
+        "microphone_id": r.microphone_id,
+    }
 
 
 @router.post("/analyze", status_code=202)

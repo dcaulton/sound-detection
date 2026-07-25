@@ -219,3 +219,10 @@ __marimo__/
 
 # local database
 sound_detection.db
+
+# Perch SavedModel weights (download separately)
+src/sound_detection/ml/perch/variables/
+src/sound_detection/ml/perch/saved_model.pb
+src/sound_detection/ml/perch/*.pb
+# keep labels if small:
+# !src/sound_detection/ml/perch/assets/

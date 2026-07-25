@@ -8,13 +8,13 @@ from pydantic import BaseModel, Field
 class Detection(BaseModel):
     """Single species detection from audio."""
 
-    species: str
-    common_name: str
+    species: str | None
+    common_name: str | None
     scientific_name: str
     confidence: float = Field(..., ge=0.0, le=1.0)
-    start_time: float  # seconds into the recording
-    end_time: float
-    mic_id: str | None = None
+    start_offset: float  # seconds into the recording
+    end_offset: float
+    model: str
 
 
 class AnalyzeAudioRequest(BaseModel):

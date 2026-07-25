@@ -29,7 +29,7 @@ def get_analyzer() -> Analyzer:
     return _analyzer
 
 
-def analyze_audio(
+def analyze_with_birdnet(
     audio_bytes: bytes,
     filename: str,
     mic_id: str | None = None,
@@ -66,9 +66,9 @@ def analyze_audio(
                     common_name=det["common_name"],
                     scientific_name=det["scientific_name"],
                     confidence=det["confidence"],
-                    start_time=det["start_time"],
-                    end_time=det["end_time"],
-                    mic_id=mic_id,
+                    start_offset=det["start_time"],
+                    end_offset=det["end_time"],
+                    model="birdnet",
                 )
             )
 

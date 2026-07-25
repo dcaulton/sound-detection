@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import select
 
 from sound_detection.db.models import Detection, Microphone, Recording, Site
+from sound_detection.schemas.detection import Detection as SchemaDetection
 from sound_detection.utils.datetime import parse_recording_datetime_from_filename
 
 log = structlog.get_logger()
@@ -17,7 +18,11 @@ class RecordingRepository:
         self.session = session
 
     async def get(self, recording_id: UUID) -> Recording | None:
-        result = await self.session.execute(select(Recording).where(Recording.id == recording_id))
+        result = await self.session.execute(
+            select(Recording)
+            .options(selectinload(Recording.detections))  # type: ignore[arg-type]
+            .where(Recording.id == recording_id)
+        )
         return result.scalars().one_or_none()
 
     async def create(self, recording: Recording) -> Recording:
@@ -27,7 +32,7 @@ class RecordingRepository:
         return recording
 
     async def save_detections(
-        self, recording_id: UUID, detections: list[dict], duration_seconds: float | None = None
+        self, recording_id: UUID, detections: list[SchemaDetection], duration_seconds: float | None = None
     ) -> None:
         """Save detections and update recording status."""
         if not detections:
@@ -46,8 +51,8 @@ class RecordingRepository:
         detection_objects: list[Detection] = []
 
         for d in detections:
-            start_offset = d.get("start_time", 0.0)
-            end_offset = d.get("end_time", 0.0)
+            start_offset = d.start_offset
+            end_offset = d.end_offset
 
             start_time = None
             end_time = None
@@ -56,16 +61,18 @@ class RecordingRepository:
                 start_time = recording.recorded_at + timedelta(seconds=start_offset)
                 end_time = recording.recorded_at + timedelta(seconds=end_offset)
 
+            log.debug(f"adding a detection for {d.species} {d.model}")
             det = Detection(
                 recording_id=recording_id,
-                species=d["species"],
-                common_name=d["common_name"],
-                scientific_name=d["scientific_name"],
-                confidence=d["confidence"],
+                species=d.species,
+                common_name=d.common_name,
+                scientific_name=d.scientific_name,
+                confidence=d.confidence,
                 start_offset=start_offset,
                 end_offset=end_offset,
                 start_time=start_time,
                 end_time=end_time,
+                model=d.model,
             )
             detection_objects.append(det)
 

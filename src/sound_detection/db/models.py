@@ -101,6 +101,30 @@ class Detection(SQLModel, table=True):  # type: ignore[call-arg]
         passive_deletes=True,
     )
 
+    # Analyzer that produced this detection
+    model: str = Field(
+        default="birdnet",
+        index=True,
+        description="Analyzer that produced this detection, e.g. birdnet | perch",
+    )
+
+    # Same UUID on detections that the disambiguation pass treats as one event.
+    # Non-null ⇒ confirmed (seen by more than one model).
+    confirmed_group_id: uuid.UUID | None = Field(
+        default=None,
+        index=True,
+        nullable=True,
+        description="Shared id when multiple models agree on the same detection event",
+    )
+
+    # Snapshot of interestingness at analysis / re-score time
+    interest_score: float | None = Field(
+        default=None,
+        index=True,
+        nullable=True,
+        description="Interestingness score at time of analysis or last re-score",
+    )
+
 
 class BiomeSummary(SQLModel, table=True):
     __tablename__ = "biome_summaries"
