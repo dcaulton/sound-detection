@@ -73,6 +73,7 @@ class RecordingRepository:
                 start_time=start_time,
                 end_time=end_time,
                 model=d.model,
+                confirmed_group_id=d.confirmed_group_id,
             )
             detection_objects.append(det)
 

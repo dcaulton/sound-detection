@@ -1,8 +1,11 @@
 """FastAPI router for audio detection endpoints."""
 
+from __future__ import annotations
+
 import asyncio
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -20,6 +23,7 @@ from sound_detection.knowledge.seed_or_update import SeedOrUpdate
 from sound_detection.ml.inference import analyze_with_birdnet
 from sound_detection.ml.perch_inference import analyze_with_perch
 from sound_detection.schemas.detection import AnalyzeAudioRequest
+from sound_detection.schemas.detection import Detection as SchemaDetection
 from sound_detection.utils.datetime import parse_recording_datetime_from_filename
 
 log = structlog.get_logger()
@@ -34,19 +38,25 @@ async def background_analyze(
         try:
             log.info("Acquired analysis semaphore", recording_id=recording_id)
 
+            perch_response = await asyncio.to_thread(analyze_with_perch, audio_bytes=audio_bytes, filename=filename)
+            log.info("Perch analysis complete", detections_found=len(perch_response.detections))
+            perch_dets = perch_response.detections
+            perch_dets = coalesce_adjacent(perch_dets)
+
+            birdnet_response = await asyncio.to_thread(analyze_with_birdnet, audio_bytes=audio_bytes, filename=filename)
+            log.info("Birdnet analysis complete", detections_found=len(birdnet_response.detections))
+            birdnet_dets = birdnet_response.detections
+            birdnet_dets = coalesce_adjacent(birdnet_dets)
+
             close_session = False
             if session is None:
                 session = AsyncSessionLocal()
                 close_session = True
             repo = RecordingRepository(session)
 
-            perch_response = await asyncio.to_thread(analyze_with_perch, audio_bytes=audio_bytes, filename=filename)
-            await repo.save_detections(recording_id=recording_id, detections=perch_response.detections)
-            log.info("Perch analysis complete", detections_found=len(perch_response.detections))
+            all_dets = coalesce_across_models(birdnet_dets + perch_dets)
 
-            birdnet_response = await asyncio.to_thread(analyze_with_birdnet, audio_bytes=audio_bytes, filename=filename)
-            await repo.save_detections(recording_id=recording_id, detections=birdnet_response.detections)
-            log.info("Birdnet analysis complete", detections_found=len(birdnet_response.detections))
+            await repo.save_detections(recording_id=recording_id, detections=all_dets)
 
             # Update recording
             recording = await session.get(Recording, recording_id)
@@ -109,7 +119,6 @@ async def get_recording(recording_id: UUID, db: AsyncSession = db_dep) -> dict:
     """Get a recording with its detections."""
     repo = RecordingRepository(db)
     r = await repo.get(recording_id)
-    log.info("donkey", recording=r)
     if not r:
         raise HTTPException(404, "Recording not found")
     return {
@@ -125,6 +134,10 @@ async def get_recording(recording_id: UUID, db: AsyncSession = db_dep) -> dict:
                 "confidence": d.confidence,
                 "start_time": d.start_time,
                 "end_time": d.end_time,
+                "start_offset": d.start_offset,
+                "end_offset": d.end_offset,
+                "model": d.model,
+                "confirmed_group_id": d.confirmed_group_id,
             }
             for d in getattr(r, "detections", [])
         ],
@@ -203,3 +216,135 @@ async def get_species_counts(days: int = 7, db: AsyncSession = db_dep) -> list[d
         }
         for row in result.all()
     ]
+
+
+def _norm_species(d: SchemaDetection) -> str:
+    name = getattr(d, "scientific_name", None) or getattr(d, "species", None) or ""
+    return str(name).strip().lower()
+
+
+def _linked(a_start: float, a_end: float, b_start: float, b_end: float, max_gap_s: float) -> bool:
+    if a_start > b_start:
+        a_start, a_end, b_start, b_end = b_start, b_end, a_start, a_end
+    return (b_start - a_end) <= max_gap_s
+
+
+def coalesce_adjacent(
+    detections: list[SchemaDetection],
+    *,
+    max_gap_s: float = 0.35,
+) -> list[SchemaDetection]:
+    """
+    Merge consecutive/overlapping detections of the same species from the
+    same model into a single span (e.g. twelve 5s Perch windows → one row).
+    """
+    if not detections:
+        return []
+
+    # Bucket: (model, species) → list of detections
+    buckets: dict[tuple[str, str], list[SchemaDetection]] = defaultdict(list)
+    passthrough: list[SchemaDetection] = []
+
+    for d in detections:
+        species = _norm_species(d)
+        model = (getattr(d, "model", None) or "unknown").lower()
+        if not species:
+            passthrough.append(d)
+            continue
+        buckets[(model, species)].append(d)
+
+    merged: list[SchemaDetection] = []
+
+    for (_model, _species), group in buckets.items():
+        # Sort by start
+        group = sorted(group, key=lambda d: float(d.start_offset))
+        cluster: list[SchemaDetection] = [group[0]]
+
+        def flush(cluster: list[SchemaDetection]) -> SchemaDetection:
+            base = cluster[0]
+            start = min(float(x.start_offset) for x in cluster)
+            end = max(float(x.end_offset) for x in cluster)
+            conf = max(float(x.confidence) for x in cluster)
+            # Mutate a copy-like update on the schema object
+            base.start_offset = start
+            base.end_offset = end
+            base.confidence = conf
+            # If you also store absolute times, recompute from recording start elsewhere
+            return base
+
+        for d in group[1:]:
+            if _linked(
+                float(cluster[0].start_offset),  # cluster span start
+                max(float(x.end_offset) for x in cluster),
+                float(d.start_offset),
+                float(d.end_offset),
+                max_gap_s,
+            ):
+                cluster.append(d)
+            else:
+                merged.append(flush(cluster))
+                cluster = [d]
+        merged.append(flush(cluster))
+
+    return passthrough + merged
+
+
+def coalesce_across_models(
+    detections: list[SchemaDetection],
+    *,
+    max_gap_s: float = 0.35,
+) -> list[SchemaDetection]:
+    """
+    Assign confirmed_group_id when the same species from different models
+    has overlapping/adjacent time ranges.
+    """
+    for d in detections:
+        d.confirmed_group_id = None
+
+    by_species: dict[str, list[SchemaDetection]] = defaultdict(list)
+    for d in detections:
+        key = _norm_species(d)
+        if key:
+            by_species[key].append(d)
+
+    for group in by_species.values():
+        n = len(group)
+        if n < 2:
+            continue
+        parent = list(range(n))
+
+        def find(i: int, p: list[int] = parent) -> int:
+            while p[i] != i:
+                p[i] = p[p[i]]
+                i = p[i]
+            return i
+
+        def union(i: int, j: int, p: list[int] = parent) -> None:
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                p[rj] = ri
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                if _linked(
+                    float(group[i].start_offset),
+                    float(group[i].end_offset),
+                    float(group[j].start_offset),
+                    float(group[j].end_offset),
+                    max_gap_s,
+                ):
+                    union(i, j)
+
+        components: dict[int, list[SchemaDetection]] = defaultdict(list)
+        for i, d in enumerate(group):
+            components[find(i)].append(d)
+
+        for members in components.values():
+            models = {(m.model or "unknown").lower() for m in members}
+            if len(models) < 2:
+                continue
+            gid = uuid4()
+            for d in members:
+                d.confirmed_group_id = gid
+
+    return detections

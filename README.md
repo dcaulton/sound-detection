@@ -75,6 +75,20 @@ Hinsdale, Illinois
 
 Building tools for ecological monitoring, local AI, and self-reliant systems.
 
+## Perch model weights (not in git)
+
+Perch v2 SavedModel files are **not** committed (they exceed GitHub’s file size limits).
+
+Place the **CPU** Perch v2 model under:
+
+```text
+src/sound_detection/ml/perch/
+  saved_model.pb
+  variables/
+  assets/
+    labels.csv
+    perch_v2_ebird_classes.csv   # optional
 ---
 
 *This project is under active development. Feedback and collaboration welcome.*
+

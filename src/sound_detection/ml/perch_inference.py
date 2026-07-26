@@ -56,11 +56,10 @@ class PerchDetection:
 
 
 @lru_cache(maxsize=1)
-def _load_model() -> Any:
+def _load_model() -> Any | None:
     if not (PERCH_MODEL_DIR / "saved_model.pb").exists():
-        raise FileNotFoundError(
-            f"Perch SavedModel not found at {PERCH_MODEL_DIR}. Expected saved_model.pb in that directory."
-        )
+        log.error(f"Perch SavedModel not found at {PERCH_MODEL_DIR}. Expected saved_model.pb in that directory.")
+        return None
     log.info("Loading Perch SavedModel from %s", PERCH_MODEL_DIR)
     model = tf.saved_model.load(str(PERCH_MODEL_DIR))
     if hasattr(model, "signatures") and model.signatures:
@@ -72,10 +71,11 @@ def _load_model() -> Any:
 
 
 @lru_cache(maxsize=1)
-def _load_labels() -> list[dict]:
+def _load_labels() -> list[dict] | None:
     path = PERCH_LABELS_PATH
     if not path.exists():
-        raise FileNotFoundError(f"Perch labels not found: {path}")
+        log.error(f"Perch labels not found: {path}")
+        return None
 
     labels: list[dict] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -155,11 +155,17 @@ def analyze_with_perch(
         return AnalyzeAudioResponse(
             detections=[],
             file_duration=0,
-            processing_time_seconds=0,
+            processing_time_seconds=round(time.perf_counter() - start_time, 3),
         )
 
     model = _load_model()
     labels = _load_labels()
+    if model is None or labels is None:  # gracefully return no detections if the model isn't present
+        return AnalyzeAudioResponse(
+            detections=[],
+            file_duration=0,
+            processing_time_seconds=round(time.perf_counter() - start_time, 3),
+        )
     detections: list[Detection] = []
 
     for start_s, chunk in windows:

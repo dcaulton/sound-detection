@@ -1,6 +1,7 @@
 """Pydantic schemas for detection endpoints."""
 
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,7 @@ class Detection(BaseModel):
     start_offset: float  # seconds into the recording
     end_offset: float
     model: str
+    confirmed_group_id: UUID | None = None
 
 
 class AnalyzeAudioRequest(BaseModel):
