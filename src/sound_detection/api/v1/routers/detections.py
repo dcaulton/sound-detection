@@ -48,13 +48,13 @@ async def background_analyze(
             birdnet_dets = birdnet_response.detections
             birdnet_dets = coalesce_adjacent(birdnet_dets)
 
+            all_dets = coalesce_across_models(birdnet_dets + perch_dets)
+
             close_session = False
             if session is None:
                 session = AsyncSessionLocal()
                 close_session = True
             repo = RecordingRepository(session)
-
-            all_dets = coalesce_across_models(birdnet_dets + perch_dets)
 
             await repo.save_detections(recording_id=recording_id, detections=all_dets)
 
@@ -81,8 +81,6 @@ async def background_analyze(
                     seed.seed_or_update(species)
                 except Exception:
                     log.exception(f"Failed to seed knowledge for species: {species}")
-
-            # TODO update interesting score and confirmed_group_id for new detections
 
             log.warning("Background analysis complete and saved", recording_id=recording_id)
 
@@ -173,6 +171,7 @@ async def analyze_audio_file(
     recorded_at = parse_recording_datetime_from_filename(filename=file.filename, timezone=tz_name) or datetime.now(
         UTC
     )  # fallback to upload time
+    log.debug(f"recorded at time is {recorded_at}")
 
     recording = Recording(
         microphone_id=mic_id,

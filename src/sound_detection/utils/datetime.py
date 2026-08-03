@@ -12,7 +12,7 @@ def parse_recording_datetime_from_filename(
     Returns None if year < min_year or parsing fails.
     """
     try:
-        base = filename.split(".")[0].replace("T", "_")
+        base = filename.split(".")[0].replace("T", "")
         dt = datetime.strptime(base, "%Y%m%d_%H%M%S")
     except (ValueError, IndexError):
         return None
@@ -21,4 +21,5 @@ def parse_recording_datetime_from_filename(
         return None
 
     local_tz = ZoneInfo(timezone)
-    return dt.replace(tzinfo=local_tz).astimezone(ZoneInfo("UTC"))
+    recording_datetime = dt.replace(tzinfo=local_tz).astimezone(ZoneInfo("UTC"))
+    return recording_datetime

@@ -21,6 +21,7 @@ from neo4j import Driver
 from PIL import Image as PILImage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import col
 
 from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording
 from sound_detection.knowledge.rag.retriever import Retriever
@@ -259,27 +260,35 @@ class BiomeSummaryService:
     3. High-interest and indicator species
     4. Rare or unexpected species
     5. Brief ecological observations and closing
+    6. Unconfirmed / single-analyzer detections (brief, cautious)
 
     **Important:**
     - Balance common/dominant species with rare and high-interest ones.
     - Use both common and scientific names.
     - Keep the tone knowledgeable but accessible. Aim for 700-1000 words.
+    - Treat CONFIRMED detections (BirdNET + Perch agreement) as reliable.
+    - Treat SPECULATED detections as possible only; do not lead with them.
+    - Prefer confirmed data for activity level, dominant species, and ecological claims.
 
     **Data**
     Time window: last {window_days} days
-    Total species detected: {total_species}
+    Confirmed species: {total_confirmed_species}
+    Speculated (single-analyzer) species: {total_speculated_species}
 
-    **Dominant / most frequent species**
+    Confirmed dominant:
     {dominant_text}
 
-    **High-interest & indicator species**
+    Confirmed high-interest / indicator:
     {high_interest_text}
 
-    **Rare / unexpected species**
+    Confirmed rare / unexpected:
     {rare_text}
 
-    **Special Groups**
+    Confirmed special groups:
     {group_highlight}
+
+    Speculated (mention cautiously, if at all):
+    {speculated_text}
 
     Human-readable report:"""
         )
@@ -315,13 +324,35 @@ class BiomeSummaryService:
             # === Phase 1: Data Gathering & Filtering ===
             log.info(f"[{summary_id}] Phase 1: Gathering detections and filtering species...")
             phase_start = datetime.now(UTC)
-            species_counts, filtered_species = await self._gather_and_filter_species(summary)
+            (
+                confirmed_counts,
+                speculated_counts,
+                confirmed_species,
+                speculated_species,
+            ) = await self._gather_and_filter_species(summary)
+
+            # Optional: still expose a combined total for old consumers
+            species_counts = {
+                name: confirmed_counts.get(name, 0) + speculated_counts.get(name, 0)
+                for name in set(confirmed_counts) | set(speculated_counts)
+            }
             log.info(f"[{summary_id}] Phase 1 completed in {(datetime.now(UTC) - phase_start).seconds}s")
 
             # === Phase 2: Per-Species Enrichment ===
-            log.info(f"[{summary_id}] Phase 2: Enriching {len(filtered_species)} notable species with RAG + LLM...")
             phase_start = datetime.now(UTC)
-            enriched_species = await self._enrich_species(summary_id, filtered_species, summary.window_days)
+            log.info(
+                f"[{summary_id}] Phase 2: Enriching {len(confirmed_species)} notable confirmed species "
+                + "with RAG + LLM..."
+            )
+            enriched_confirmed_species = await self._enrich_species(summary_id, confirmed_species, summary.window_days)
+            log.info(
+                f"[{summary_id}] Phase 2: Enriching {len(speculated_species)} notable speculated species "
+                + "with RAG + LLM..."
+            )
+            enriched_speculated_species = await self._enrich_species(
+                summary_id, speculated_species, summary.window_days
+            )
+
             log.info(f"[{summary_id}] Phase 2 completed in {(datetime.now(UTC) - phase_start).seconds}s")
 
             # === Phase 3: Narrative Generation ===
@@ -329,8 +360,10 @@ class BiomeSummaryService:
             phase_start = datetime.now(UTC)
             machine_narrative, human_narrative, images, species_table = await self._generate_narratives(
                 summary_id=summary.id,
-                species_counts=species_counts,
-                enriched_species=enriched_species,
+                confirmed_counts=confirmed_counts,
+                enriched_confirmed_species=enriched_confirmed_species,
+                speculated_counts=speculated_counts,
+                enriched_speculated_species=enriched_speculated_species,
                 window_days=summary.window_days,
             )
             summary.narrative = machine_narrative
@@ -340,12 +373,13 @@ class BiomeSummaryService:
             log.info(f"[{summary_id}] Phase 3 completed in {(datetime.now(UTC) - phase_start).seconds}s")
 
             # Save final results
+            # TODO add speculated species and speculated species counts
             summary.summary_json = {
                 "window_days": summary.window_days,
                 "total_detections": sum(species_counts.values()),
-                "total_species": len(species_counts),
-                "species_counts": species_counts,
-                "notable_species": enriched_species,
+                "total_species": len(confirmed_counts | speculated_counts),
+                "species_counts": confirmed_counts,
+                "notable_species": enriched_confirmed_species,
                 "generated_at": datetime.now(UTC).isoformat(),
             }
             summary.status = "completed"
@@ -409,12 +443,36 @@ class BiomeSummaryService:
         await self.session.commit()
         return True
 
-    async def _gather_and_filter_species(self, summary: BiomeSummary) -> tuple[dict[str, int], list[dict]]:
+    async def _gather_and_filter_species(
+        self, summary: BiomeSummary
+    ) -> tuple[dict[str, int], dict[str, int], list[dict], list[dict]]:
+        """
+        Returns:
+            confirmed_counts:   scientific_name -> distinct confirmed_group_id count
+            speculated_counts:  scientific_name -> single-model detection count
+            confirmed_species:  filtered list for enrichment (confirmation=confirmed)
+            speculated_species: filtered list for enrichment (confirmation=speculated)
+        """
         log.info(f"[{summary.id}] Querying detections from last {summary.window_days} days...")
-
         cutoff = datetime.now(UTC) - timedelta(days=summary.window_days)
 
-        stmt = (
+        # --- Confirmed: agreement events (distinct group ids per species) ---
+        confirmed_stmt = (
+            select(  # type: ignore[call-overload]
+                Detection.scientific_name,
+                func.count(func.distinct(Detection.confirmed_group_id)).label("count"),  # type: ignore[arg-type]
+            )  # type: ignore[arg-type]
+            .join(Recording, Detection.recording_id == Recording.id)
+            .join(Microphone, Recording.microphone_id == Microphone.id)
+            .where(Microphone.site_id == summary.site_id)
+            .where(Detection.created_at >= cutoff)
+            .where(col(Detection.confirmed_group_id).is_not(None))
+            .group_by(Detection.scientific_name)
+            .order_by(func.count(func.distinct(Detection.confirmed_group_id)).desc())  # type: ignore[arg-type]
+        )
+
+        # --- Speculated: single-model rows only ---
+        speculated_stmt = (
             select(  # type: ignore[call-overload]
                 Detection.scientific_name,
                 func.count().label("count"),  # type: ignore[arg-type]
@@ -423,72 +481,103 @@ class BiomeSummaryService:
             .join(Microphone, Recording.microphone_id == Microphone.id)
             .where(Microphone.site_id == summary.site_id)
             .where(Detection.created_at >= cutoff)
+            .where(col(Detection.confirmed_group_id).is_(None))
             .group_by(Detection.scientific_name)
             .order_by(func.count().desc())  # type: ignore[arg-type]
         )
 
-        result = await self.session.execute(stmt)
-        rows = result.all()
+        confirmed_rows = (await self.session.execute(confirmed_stmt)).all()
+        speculated_rows = (await self.session.execute(speculated_stmt)).all()
 
-        # Build counts with explicit int() to satisfy mypy
-        species_counts: dict[str, int] = {}
-        for row in rows:
-            species_counts[row.scientific_name] = int(row.count)  # type: ignore[call-overload]
+        confirmed_counts: dict[str, int] = {}
+        for row in confirmed_rows:
+            if row.scientific_name:
+                confirmed_counts[row.scientific_name] = int(row.count)  # type: ignore[call-overload]
 
-        if not species_counts:
+        speculated_counts: dict[str, int] = {}
+        for row in speculated_rows:
+            if row.scientific_name:
+                speculated_counts[row.scientific_name] = int(row.count)  # type: ignore[call-overload]
+
+        if not confirmed_counts and not speculated_counts:
             log.info(f"[{summary.id}] No detections found in window.")
-            return {}, []
+            return {}, {}, [], []
 
-        max_count = max(species_counts.values())
-        log.info(f"[{summary.id}] Found {len(species_counts)} species. Max count = {max_count}")
+        all_counts = {**speculated_counts, **confirmed_counts}  # confirmed overwrites if both
+        max_count = max(all_counts.values())
+        log.info(
+            f"[{summary.id}] Found {len(confirmed_counts)} confirmed, "
+            f"{len(speculated_counts)} speculated species. Max count = {max_count}"
+        )
 
-        # Get species context from Neo4j
+        # Get species context from Neo4j (union of names)
         species_contexts: dict[str, dict] = {}
         if self.species_service is not None:
-            for name in species_counts:
+            for name in set(confirmed_counts) | set(speculated_counts):
                 context = self.species_service.get_species_by_scientific_name(name)
                 if context:
                     species_contexts[name] = context
 
-        # Apply sliding-scale filtering
-        filtered_species: list[dict] = []
-        for name, count in species_counts.items():
+        def _passes_filters(name: str, count: int, *, drop_singles: bool) -> bool:
             name_lower = name.lower().strip()
 
             # 1. Skip known non-species labels
             if name_lower in NON_SPECIES_LABELS:
-                continue
+                return False
 
             # 2. Skip single-observation detections (likely false positives)
-            if count <= 1:
-                continue
+            #    Confirmed events skip this: one agreement is already strong signal
+            if drop_singles and count <= 1:
+                return False
 
-            # 3. Optional: require it to look roughly like a scientific name
-            # (contains a space and starts with a capital letter)
+            # 3. Require it to look roughly like a scientific name
             if " " not in name or not name[0].isupper():
-                continue
+                return False
 
-            context = species_contexts.get(name, {})
             # this is a little too agressive for now, and messes up multitenancy.
             # TODO: have a user or site setting drive this later
+            # context = species_contexts.get(name, {})
             # recorded_in_illinois = context.get("recorded_in_illinois", False)
             # if not recorded_in_illinois:
-            #     continue
+            #     return False
 
-            filtered_species.append(
+            return True
+
+        confirmed_species: list[dict] = []
+        for name, count in confirmed_counts.items():
+            if not _passes_filters(name, count, drop_singles=False):
+                continue
+            confirmed_species.append(
                 {
                     "scientific_name": name,
                     "count": count,
-                    "context": context,
+                    "confirmation": "confirmed",
+                    "context": species_contexts.get(name, {}),
+                }
+            )
+
+        speculated_species: list[dict] = []
+        for name, count in speculated_counts.items():
+            if not _passes_filters(name, count, drop_singles=True):
+                continue
+            speculated_species.append(
+                {
+                    "scientific_name": name,
+                    "count": count,
+                    "confirmation": "speculated",
+                    "context": species_contexts.get(name, {}),
                 }
             )
 
         log.info(
-            f"[{summary.id}] After filtering: {len(filtered_species)} species kept "
-            f"(discarded {len(species_counts) - len(filtered_species)})"
+            f"[{summary.id}] After filtering: "
+            f"confirmed={len(confirmed_species)} "
+            f"(from {len(confirmed_counts)}), "
+            f"speculated={len(speculated_species)} "
+            f"(from {len(speculated_counts)})"
         )
 
-        return species_counts, filtered_species
+        return confirmed_counts, speculated_counts, confirmed_species, speculated_species
 
     def _build_species_enrichment_chain(self) -> Runnable:
         prompt = ChatPromptTemplate.from_template(
@@ -596,21 +685,29 @@ Write a clear, information-dense report. Use short paragraphs and bullet points 
 - Brief mention of rare or unexpected species
 - One or two ecological observations worth tracking
 
-**Data**
-Time window: last {window_days} days
-Total species detected: {total_species}
+**Important:**
+- Treat CONFIRMED detections (BirdNET + Perch agreement) as reliable.
+- Treat SPECULATED detections as possible only; do not lead with them.
+- Prefer confirmed data for activity level, dominant species, and ecological claims.
 
-Dominant species:
+Time window: last {window_days} days
+Confirmed species: {total_confirmed_species}
+Speculated (single-analyzer) species: {total_speculated_species}
+
+Confirmed dominant:
 {dominant_text}
 
-High-interest / indicator species:
+Confirmed high-interest / indicator:
 {high_interest_text}
 
-Rare / unexpected species:
+Confirmed rare / unexpected:
 {rare_text}
 
-Special groups:
+Confirmed special groups:
 {group_highlight}
+
+Speculated (mention cautiously):
+{speculated_text}
 
 Structured summary:"""
         )
@@ -758,8 +855,10 @@ Structured summary:"""
     async def _generate_narratives(
         self,
         summary_id: UUID,
-        species_counts: dict[str, int],
-        enriched_species: list[dict],
+        confirmed_counts: dict[str, int],
+        enriched_confirmed_species: list[dict],
+        speculated_counts: dict[str, int],
+        enriched_speculated_species: list[dict],
         window_days: int,
     ) -> tuple[str, str, list[dict[str, Any]], list[ScoredSpecies]]:
         """
@@ -768,23 +867,28 @@ Structured summary:"""
         """
         log.info(f"[{summary_id}] Generating narratives...")
 
-        # ----- Build context lookup -----
+        # ----- Context from enrichment (confirmed preferred, then speculated) -----
         species_contexts: dict[str, dict] = {}
-        for sp in enriched_species:
+        for sp in enriched_confirmed_species + enriched_speculated_species:
             name = sp["scientific_name"]
             species_contexts[name] = sp.get("context") or {}
 
-        # Ensure every counted species has at least an empty context
-        for name in species_counts:
+        for name in set(confirmed_counts) | set(speculated_counts):
             species_contexts.setdefault(name, {})
 
-        # ----- Score & bucket -----
-        buckets = bucket_species(species_counts, species_contexts)
+        # ----- Score & bucket on CONFIRMED only (hard-won signal) -----
+        buckets = bucket_species(confirmed_counts, species_contexts)
 
-        # ----- Group highlight (now driven by buckets) -----
+        # Speculated: score for a short secondary list (still use same scorer)
+        speculated_buckets = bucket_species(speculated_counts, species_contexts)
+
+        # ----- Group highlight (confirmed) -----
         group_parts = []
-
-        for group_key, label in [("owl", "Owls"), ("raptor", "Raptors"), ("hummingbird", "Hummingbirds")]:
+        for group_key, label in [
+            ("owl", "Owls"),
+            ("raptor", "Raptors"),
+            ("hummingbird", "Hummingbirds"),
+        ]:
             members = [r for r in buckets["raptors_owls_hummingbirds"] if r["group"] == group_key]
             if not members:
                 continue
@@ -799,42 +903,47 @@ Structured summary:"""
             group_parts.append(f"{label}: {len(members)} species ({', '.join(names)})")
 
         group_highlight = (
-            "\n".join(group_parts) if group_parts else "No major raptor, owl, or hummingbird diversity noted."
+            "\n".join(group_parts)
+            if group_parts
+            else "No major raptor, owl, or hummingbird diversity noted among confirmed detections."
         )
 
-        # ----- High-interest & dominant text for the prompt -----
         def format_species_list(rows: list[ScoredSpecies], limit: int = 8) -> str:
             parts = []
             for r in rows[:limit]:
                 common = r["common_name"] or ""
                 label = f"{common} (*{r['scientific_name']}*)" if common else f"*{r['scientific_name']}*"
-                parts.append(f"- {label}: {r['count']} detections (score {r['score']})")
+                parts.append(f"- {label}: {r['count']} events (score {r['score']})")
             return "\n".join(parts) if parts else "None"
 
         high_interest_text = format_species_list(buckets["high_interest"])
         dominant_text = format_species_list(buckets["dominant"])
         rare_text = format_species_list(buckets["rare_vagrant"])
+        # Speculated: top by score only, capped, clearly labeled later in prompts
+        speculated_text = format_species_list(
+            speculated_buckets["high_interest"] or speculated_buckets["dominant"],
+            limit=6,
+        )
 
-        # ----- Shared prompt variables -----
         prompt_vars = {
             "window_days": window_days,
-            "total_species": len(species_counts),
+            "total_confirmed_species": len(confirmed_counts),
+            "total_speculated_species": len(speculated_counts),
             "group_highlight": group_highlight,
             "high_interest_text": high_interest_text,
             "dominant_text": dominant_text,
             "rare_text": rare_text,
+            "speculated_text": speculated_text,
         }
 
-        # ----- Machine narrative (keep relatively simple) -----
         machine_chain = self._build_narrative_chain()
         machine_narrative = await machine_chain.ainvoke(prompt_vars)
 
-        # ----- Human-readable narrative -----
         human_chain = self._build_human_narrative_chain()
         human_narrative = await human_chain.ainvoke(prompt_vars)
 
-        # ----- Images (prefer high-interest species) -----
-        notable_species_images = []
+        # Images: prefer confirmed high-interest
+        notable_species_images: list[dict[str, Any]] = []
         image_candidates: list[Any] = buckets["high_interest"] or buckets["dominant"]
         for sp in image_candidates[:5]:
             name = sp["scientific_name"]
@@ -845,10 +954,12 @@ Structured summary:"""
                         "scientific_name": name,
                         "common_name": sp.get("common_name"),
                         "count": sp["count"],
+                        "confirmation": "confirmed",
                         "image_url": image_url,
                     }
                 )
 
+        # Table: confirmed rows first (by count), then mark confirmation in consumer if needed
         return (
             machine_narrative.strip(),
             human_narrative.strip(),

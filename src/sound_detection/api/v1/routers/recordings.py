@@ -28,3 +28,12 @@ async def update_recording(
     if not updated:
         raise HTTPException(status_code=404, detail="Recording not found")
     return updated
+
+
+@router.delete("/{recording_id}", status_code=204)
+async def delete_recording(recording_id: UUID, db: AsyncSession = db_dep) -> None:
+    rec = await db.get(Recording, recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    await db.delete(rec)
+    await db.commit()
