@@ -66,7 +66,13 @@ class Recording(SQLModel, table=True):  # type: ignore[call-arg]
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     microphone: Microphone = Relationship(back_populates="recordings")
-    detections: list["Detection"] = Relationship(back_populates="recording")
+    detections: list["Detection"] = Relationship(
+        back_populates="recording",
+        sa_relationship_kwargs={
+            "cascade": "all, delete-orphan",
+            "passive_deletes": True,
+        },
+    )
 
 
 class Detection(SQLModel, table=True):  # type: ignore[call-arg]
