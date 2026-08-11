@@ -90,5 +90,26 @@ src/sound_detection/ml/perch/
     perch_v2_ebird_classes.csv   # optional
 ---
 
+## Offline: merge AudioMoth day files
+
+AudioMoth (and similar) often produce many short WAVs named `YYYYMMDD_HHMMSS.WAV`.
+Before bulk upload, compact each calendar day into one time-aligned FLAC with
+digital silence in the gaps so detection timestamps stay correct.
+
+**Run on the uploader/workstation** (needs `ffmpeg` only on the API side for
+segmenting; this script uses `soundfile` + `numpy`):
+
+```bash
+# preview
+uv run python bin/merge_audiomoth_days.py /path/to/raw_wavs --dry-run
+
+# write FLACs next to source
+uv run python bin/merge_audiomoth_days.py /path/to/raw_wavs
+
+# custom output + overwrite
+uv run python bin/merge_audiomoth_days.py /path/to/raw_wavs \
+  --output-dir /path/to/merged \
+  --force
+
 *This project is under active development. Feedback and collaboration welcome.*
 
