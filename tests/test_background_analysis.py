@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,64 +11,56 @@ from sound_detection.api.v1.routers.detections import background_analyze
 from sound_detection.db.models import Detection, Recording
 from sound_detection.db.repositories import RecordingRepository
 
+FIXTURE = Path("data/test_bird.mp3")
+
 
 @pytest.mark.asyncio
 async def test_background_analyze_creates_recording_and_detections(
     async_session: AsyncSession,
 ) -> None:
-    """
-    Real end-to-end test using actual BirdNET on test_bird.mp3.
-    Verifies Recording + Detection records are created correctly.
-    """
-    audio_path = Path("data/test_bird.mp3")
-    audio_bytes = audio_path.read_bytes()
-    filename = audio_path.name
+    assert FIXTURE.is_file(), f"Missing fixture: {FIXTURE}"
 
-    repo = RecordingRepository(async_session)
-    mic = await repo.get_or_create_default_microphone()
+    # Working copy — background_analyze may delete audio_path in finally
+    work_dir = Path(tempfile.mkdtemp(prefix="sd_test_"))
+    work_path = work_dir / FIXTURE.name
+    shutil.copy(FIXTURE, work_path)
 
-    # Create a Recording (simulating the API layer)
-    new_recording = Recording(
-        microphone_id=mic.id,
-        filename=filename,
-        file_path=str(audio_path),
-        status="pending",
-        recorded_at=datetime.now(UTC),
-    )
-    async_session.add(new_recording)
-    await async_session.commit()
-    await async_session.refresh(new_recording)
-
-    # Run the real background analysis (calls BirdNET)
     try:
+        repo = RecordingRepository(async_session)
+        mic = await repo.get_or_create_default_microphone()
+
+        new_recording = Recording(
+            microphone_id=mic.id,
+            filename=FIXTURE.name,
+            file_path=str(work_path),
+            status="pending",
+            recorded_at=datetime.now(UTC),
+        )
+        async_session.add(new_recording)
+        await async_session.commit()
+        await async_session.refresh(new_recording)
+
         await background_analyze(
             recording_id=new_recording.id,
-            audio_bytes=audio_bytes,
-            filename=filename,
+            audio_path=str(work_path),
+            filename=FIXTURE.name,
             session=async_session,
         )
 
-    except Exception as e:
-        print(">>> BACKGROUND_ANALYZE FAILED WITH:", e)
-        raise
+        rec_result = await async_session.execute(
+            select(Recording).where(Recording.id == new_recording.id)  # type: ignore[arg-type]
+        )
+        updated = rec_result.scalar_one()
+        assert updated.status == "completed"
+        assert updated.duration_seconds is not None and updated.duration_seconds > 0
 
-    # Force fresh read from DB (more reliable than refresh in this setup)
-    rec_result = await async_session.execute(
-        select(Recording).where(Recording.id == new_recording.id)  # type: ignore[arg-type]
-    )
-    updated_recording = rec_result.scalar_one()
-
-    assert updated_recording.status == "completed"
-    assert updated_recording.duration_seconds is not None and updated_recording.duration_seconds > 0
-
-    # Detections
-    det_result = await async_session.execute(
-        select(Detection).where(Detection.recording_id == new_recording.id)  # type: ignore[arg-type]
-    )
-    detections = det_result.scalars().all()
-
-    assert len(detections) > 0
-    first = detections[0]
-    assert first.species is not None
-    assert first.confidence is not None
-    assert first.start_time is not None
+        det_result = await async_session.execute(
+            select(Detection).where(Detection.recording_id == new_recording.id)  # type: ignore[arg-type]
+        )
+        detections = list(det_result.scalars().all())
+        assert len(detections) > 0
+        assert detections[0].species is not None
+        assert detections[0].confidence is not None
+        assert detections[0].start_time is not None
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)

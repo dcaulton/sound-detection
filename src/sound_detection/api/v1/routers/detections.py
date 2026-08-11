@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import structlog
@@ -24,6 +25,7 @@ from sound_detection.ml.inference import analyze_with_birdnet
 from sound_detection.ml.perch_inference import analyze_with_perch
 from sound_detection.schemas.detection import AnalyzeAudioRequest
 from sound_detection.schemas.detection import Detection as SchemaDetection
+from sound_detection.utils.audio_io import probe_duration_seconds, segment_audio, stream_upload_to_temp
 from sound_detection.utils.datetime import parse_recording_datetime_from_filename
 
 log = structlog.get_logger()
@@ -32,60 +34,105 @@ db_dep = Depends(get_db)
 
 
 async def background_analyze(
-    recording_id: UUID, audio_bytes: bytes, filename: str, session: AsyncSession | None = None
+    recording_id: UUID,
+    audio_path: str,
+    filename: str,
+    session: AsyncSession | None = None,
+    segment_seconds: int = 900,
 ) -> None:
+    path = Path(audio_path)
+    seg_paths: list[Path] = []
     async with analysis_semaphore:
         try:
             log.info("Acquired analysis semaphore", recording_id=recording_id)
+            duration = probe_duration_seconds(path)
 
-            perch_response = await asyncio.to_thread(analyze_with_perch, audio_bytes=audio_bytes, filename=filename)
-            log.info("Perch analysis complete", detections_found=len(perch_response.detections))
-            perch_dets = perch_response.detections
-            perch_dets = coalesce_adjacent(perch_dets)
+            # Small files: single shot (no segment dir clutter)
+            size_mb = path.stat().st_size / (1024 * 1024)
+            if size_mb <= 50 and path.suffix.lower() in {".wav", ".mp3"}:
+                seg_paths = [path]
+                offsets = [0.0]
+            else:
+                seg_paths = segment_audio(path, segment_seconds=segment_seconds)
+                offsets = [float(i * segment_seconds) for i in range(len(seg_paths))]
 
-            birdnet_response = await asyncio.to_thread(analyze_with_birdnet, audio_bytes=audio_bytes, filename=filename)
-            log.info("Birdnet analysis complete", detections_found=len(birdnet_response.detections))
-            birdnet_dets = birdnet_response.detections
-            birdnet_dets = coalesce_adjacent(birdnet_dets)
+            all_dets: list = []
+            for seg_path, base_offset in zip(seg_paths, offsets, strict=True):
+                log.info("Analyzing segment", offset=base_offset)
+                seg_bytes = seg_path.read_bytes()  # one segment only
+                perch_response = await asyncio.to_thread(
+                    analyze_with_perch, audio_bytes=seg_bytes, filename=seg_path.name
+                )
+                birdnet_response = await asyncio.to_thread(
+                    analyze_with_birdnet, audio_bytes=seg_bytes, filename=seg_path.name
+                )
+                perch_dets = coalesce_adjacent(perch_response.detections)
+                birdnet_dets = coalesce_adjacent(birdnet_response.detections)
+                for d in perch_dets + birdnet_dets:
+                    d.start_offset = float(d.start_offset) + base_offset
+                    d.end_offset = float(d.end_offset) + base_offset
+                all_dets.extend(perch_dets)
+                all_dets.extend(birdnet_dets)
+                del seg_bytes  # drop before next segment
 
-            all_dets = coalesce_across_models(birdnet_dets + perch_dets)
+            all_dets = coalesce_across_models(all_dets)
 
             close_session = False
             if session is None:
                 session = AsyncSessionLocal()
                 close_session = True
-            repo = RecordingRepository(session)
+            try:
+                repo = RecordingRepository(session)
+                await repo.save_detections(recording_id=recording_id, detections=all_dets)
+                recording = await session.get(Recording, recording_id)
+                if recording:
+                    recording.status = "completed"
+                    recording.duration_seconds = duration
+                    session.add(recording)
+                if close_session:
+                    await session.commit()
+            finally:
+                if close_session and session is not None:
+                    await session.close()
 
-            await repo.save_detections(recording_id=recording_id, detections=all_dets)
-
-            # Update recording
-            recording = await session.get(Recording, recording_id)
-
-            if recording:
-                recording.status = "completed"
-                recording.duration_seconds = getattr(birdnet_response, "file_duration", None)
-                session.add(recording)
-
-            if close_session:
-                await session.commit()
-                await session.close()
-
-            log.info("Recording updated to complete")
-
-            # Trigger knowledge enrichment once per new species
-            unique_species = {d.scientific_name for d in birdnet_response.detections}
-            unique_species |= {d.scientific_name for d in perch_response.detections}
+            # knowledge seed (same as today)
+            unique_species = {d.scientific_name for d in all_dets if getattr(d, "scientific_name", None)}
             for species in unique_species:
                 try:
-                    seed = SeedOrUpdate(get_neo4j_driver())
-                    seed.seed_or_update(species)
+                    SeedOrUpdate(get_neo4j_driver()).seed_or_update(species)
                 except Exception:
-                    log.exception(f"Failed to seed knowledge for species: {species}")
+                    log.exception("Failed to seed knowledge", species=species)
 
-            log.warning("Background analysis complete and saved", recording_id=recording_id)
+            log.info("Background analysis complete", recording_id=recording_id, detections=len(all_dets))
 
         except Exception:
             log.exception("Background analysis failed", recording_id=recording_id)
+            try:
+                if session is not None:
+                    rec = await session.get(Recording, recording_id)
+                    if rec:
+                        rec.status = "failed"
+                        session.add(rec)
+                        await session.commit()
+                else:
+                    async with AsyncSessionLocal() as err_db:
+                        rec = await err_db.get(Recording, recording_id)
+                        if rec:
+                            rec.status = "failed"
+                            await err_db.commit()
+            except Exception:
+                log.exception("Failed to mark recording failed", recording_id=recording_id)
+        finally:
+            # remove segments we created; keep original only if it was the sole seg
+            for p in seg_paths:
+                if p.resolve() != path.resolve():
+                    p.unlink(missing_ok=True)
+                    # remove empty seg dir
+                    try:
+                        p.parent.rmdir()
+                    except OSError:
+                        pass
+            path.unlink(missing_ok=True)
 
 
 @router.get("/recordings")
@@ -150,41 +197,48 @@ async def analyze_audio_file(
     metadata: AnalyzeAudioRequest = Depends(),  # noqa: B008
     db: AsyncSession = db_dep,
 ) -> dict:
-    """Upload audio → returns immediately, processing happens in background."""
     if not file.filename or not file.filename.lower().endswith((".wav", ".mp3", ".flac")):
         raise HTTPException(400, "Only WAV, MP3, or FLAC files are supported")
 
-    content = await file.read()
-    repo = RecordingRepository(db)
+    suffix = Path(file.filename).suffix.lower()
+    audio_path = await stream_upload_to_temp(file, suffix=suffix)
 
-    # Get or create a microphone if none was specified
+    repo = RecordingRepository(db)
     if not metadata.mic_id:
         default_mic = await repo.get_or_create_default_microphone()
         mic_id: UUID = default_mic.id
     else:
         mic_id = metadata.mic_id  # type: ignore[assignment]
 
-    # Parse recorded_at from filename using the microphone's timezone ===
+    # Prefer explicit timezone query over mic.site lazy load
     mic = await db.get(Microphone, mic_id)
-    tz_name = mic.site.timezone if mic and mic.site else "UTC"
+    tz_name = "UTC"
+    if mic is not None:
+        # if you already fixed selectinload, mic.site is fine; else:
+        from sound_detection.db.models import Site
 
-    recorded_at = parse_recording_datetime_from_filename(filename=file.filename, timezone=tz_name) or datetime.now(
-        UTC
-    )  # fallback to upload time
-    log.debug(f"recorded at time is {recorded_at}")
+        if mic.site_id is not None:
+            site = await db.get(Site, mic.site_id)
+            if site and site.timezone:
+                tz_name = site.timezone
+
+    recorded_at = parse_recording_datetime_from_filename(filename=file.filename, timezone=tz_name) or datetime.now(UTC)
 
     recording = Recording(
         microphone_id=mic_id,
         filename=file.filename,
-        file_path=f"/tmp/{file.filename}",
+        file_path=str(audio_path),
         recorded_at=recorded_at,
         status="pending",
     )
     recording = await repo.create(recording)
 
-    background_tasks.add_task(background_analyze, recording.id, content, file.filename)
-
-    log.info("Upload accepted for background processing", recording_id=recording.id)
+    background_tasks.add_task(
+        background_analyze,
+        recording.id,
+        str(audio_path),
+        file.filename,
+    )
 
     return {
         "message": "Processing started",
