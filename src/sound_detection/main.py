@@ -12,6 +12,7 @@ from rich.console import Console
 
 from sound_detection.api.v1.routers import biome, debug, detections, knowledge, microphones, recordings, sites, species
 from sound_detection.core.config import settings
+from sound_detection.utils.audio_io import configure_temp_root
 
 load_dotenv()
 logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO"))
@@ -22,7 +23,8 @@ console = Console()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup and shutdown events."""
-    console.print(f"[bold green]🚀 {settings.service_name} starting[/]")
+    tmp = configure_temp_root()
+    console.print(f"[bold green]🚀 Starting {settings.service_name}[/]  tmp={tmp}")
     yield
     console.print("[bold red]⏹️  sound-detection shutting down[/]")
 

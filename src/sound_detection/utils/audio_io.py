@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -7,24 +8,16 @@ from pathlib import Path
 
 from fastapi import UploadFile
 
-
-def require_ffmpeg() -> str:
-    path = shutil.which("ffmpeg")
-    if not path:
-        raise RuntimeError("ffmpeg not found on PATH")
-    return path
-
-
-def require_ffprobe() -> str:
-    path = shutil.which("ffprobe")
-    if not path:
-        raise RuntimeError("ffprobe not found on PATH")
-    return path
+from sound_detection.core.config import settings
 
 
 async def stream_upload_to_temp(upload: UploadFile, suffix: str) -> Path:
-    """Stream upload to disk in 1MiB chunks — never hold full body in RAM."""
-    fd, name = tempfile.mkstemp(prefix="sd_upload_", suffix=suffix)
+    """Stream upload to AUDIO_TMP_ROOT in 1MiB chunks."""
+    fd, name = tempfile.mkstemp(
+        prefix="sd_upload_",
+        suffix=suffix,
+        dir=str(audio_tmp_root()),
+    )
     path = Path(name)
     try:
         with open(fd, "wb") as out:
@@ -36,29 +29,9 @@ async def stream_upload_to_temp(upload: UploadFile, suffix: str) -> Path:
     return path
 
 
-def probe_duration_seconds(path: Path) -> float | None:
-    cmd = [
-        require_ffprobe(),
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-    out = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    text = out.stdout.strip()
-    return float(text) if text else None
-
-
 def segment_audio(input_path: Path, segment_seconds: int = 900) -> list[Path]:
-    """
-    Split into fixed-length WAV segments on disk.
-    Returns paths in order. Last segment may be shorter.
-    """
     require_ffmpeg()
-    out_dir = Path(tempfile.mkdtemp(prefix="sd_seg_"))
+    out_dir = Path(tempfile.mkdtemp(prefix="sd_seg_", dir=str(audio_tmp_root())))
     pattern = out_dir / "seg_%03d.wav"
     subprocess.run(
         [
@@ -82,3 +55,46 @@ def segment_audio(input_path: Path, segment_seconds: int = 900) -> list[Path]:
         capture_output=True,
     )
     return sorted(out_dir.glob("seg_*.wav"))
+
+
+def audio_tmp_root() -> Path:
+    root = Path(settings.audio_tmp_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def configure_temp_root() -> Path:
+    root = audio_tmp_root()
+    tempfile.tempdir = str(root)
+    os.environ["TMPDIR"] = str(root)
+    return root
+
+
+def require_ffmpeg() -> str:
+    path = shutil.which("ffmpeg")
+    if not path:
+        raise RuntimeError("ffmpeg not found on PATH")
+    return path
+
+
+def require_ffprobe() -> str:
+    path = shutil.which("ffprobe")
+    if not path:
+        raise RuntimeError("ffprobe not found on PATH")
+    return path
+
+
+def probe_duration_seconds(path: Path) -> float | None:
+    cmd = [
+        require_ffprobe(),
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    out = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    text = out.stdout.strip()
+    return float(text) if text else None

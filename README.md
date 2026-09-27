@@ -64,9 +64,43 @@ This project is approaching a state where it can be shared more broadly as both 
 - **Yard Sage** — LangGraph agent for generating biome reports from Obsidian notes + local weather data.
 - **Frigate + AudioMoth integration** — Real-time event detection and LLM-assisted classification.
 
-## Getting Started (Coming Soon)
+## Getting started
 
-Full setup instructions, Docker Compose / Kubernetes manifests, and model deployment guides will be added as the project stabilizes for wider use.
+### 1. Temp disk (required for day-length files)
+
+Uploads and ffmpeg segments are written under `AUDIO_TMP_ROOT`.
+That path must be a **real disk**, not tmpfs `/tmp`.
+
+```bash
+# .env
+AUDIO_TMP_ROOT=/home/dcaulton/data/sound-detection-tmp
+```
+
+```bash
+mkdir -p "$AUDIO_TMP_ROOT"
+df -h "$AUDIO_TMP_ROOT"
+```
+
+You want tens of GB free. A 24h FLAC is ~10GB; analysis also writes
+15-minute WAV segments next to it until that recording finishes.
+
+On startup the API logs `tmp=...`. If that path is `/tmp` and
+`df -hT /tmp` shows `tmpfs`, large uploads will sit in RAM.
+
+### 2. Services
+
+```bash
+docker compose up -d postgres   # and neo4j if you use the graph
+make dev                        # uvicorn --reload
+```
+
+Open http://127.0.0.1:8000/docs
+
+`make dev` is the local entrypoint, not `uv run dev`.
+```
+
+Adjust the example path if yours differs.
+
 
 ## Author
 

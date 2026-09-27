@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     default_confidence_threshold: float = 0.6
     audio_sample_rate: int = 48000
 
+    audio_tmp_root: str = "/tmp"
+    max_concurrent_ingests: int = 1
+
 
 # Singleton instance
 settings = Settings()
