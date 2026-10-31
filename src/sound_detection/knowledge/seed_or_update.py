@@ -5,6 +5,7 @@ import logging
 from neo4j import Driver
 
 from sound_detection.knowledge.harvesters.ebird import EbirdHarvester
+from sound_detection.knowledge.harvesters.gbif import GbifHarvester
 from sound_detection.knowledge.rag.pipeline import RAGPipeline
 from sound_detection.knowledge.rag.rag_enricher import RAGEnricher
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
@@ -28,6 +29,7 @@ class SeedOrUpdate:
         self.rag_pipeline = RAGPipeline(driver)
         self.rag_enricher = RAGEnricher(driver)  # type: ignore[call-arg]
         self.service = SpeciesKnowledgeService(driver)
+        self.gbif = GbifHarvester()
 
     def seed_or_update(self, scientific_name: str, extra_instructions: str | None = None) -> dict:
         # Skip if species already has Wikipedia chunks (deeper enrichment already done)
@@ -59,5 +61,8 @@ class SeedOrUpdate:
 
         self.service.upsert_species(enriched)
         self.service.upsert_relationships(enriched)
+
+        ranks = self.gbif.fetch_ranks(scientific_name)
+        self.service.upsert_taxonomy(scientific_name, ranks)
 
         return self.service.get_species_context(scientific_name) or enriched

@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sound_detection.db.neo4j import get_neo4j_driver
@@ -27,18 +28,25 @@ def get_biome_service(
 dep_gbs = Depends(get_biome_service)
 
 
+class CreateSummaryRequest(BaseModel):
+    site_id: UUID
+    window_days: int = Field(default=30, ge=1, le=365)
+    criteria: dict[str, Any] | None = None
+
+
 @router.post("/summary")
 async def create_summary(
-    site_id: Annotated[UUID, Query(...)],
+    body: CreateSummaryRequest,
     background_tasks: BackgroundTasks,
     service: Annotated[BiomeSummaryService, dep_gbs],
-    window_days: Annotated[int, Query(ge=1, le=365)] = 30,
 ) -> dict[str, Any]:
     """Start a new biome summary job (returns immediately)."""
-    summary_id = await service.create_summary_job(site_id=site_id, window_days=window_days)
-
+    summary_id = await service.create_summary_job(
+        site_id=body.site_id,
+        window_days=body.window_days,
+        criteria=body.criteria,
+    )
     background_tasks.add_task(run_generate_summary, summary_id)
-
     return {
         "status": "started",
         "summary_id": str(summary_id),

@@ -13,6 +13,37 @@ class SpeciesKnowledgeService:
     def __init__(self, driver: Driver) -> None:
         self.driver = driver
 
+    def upsert_taxonomy(self, scientific_name: str, ranks: list[tuple[str, str]]) -> None:
+        """Write species → lowest rank, and PARENT_OF edges up the chain."""
+        if not scientific_name or not ranks:
+            return
+        with self.driver.session() as session:
+            lowest_rank, lowest_name = ranks[-1]
+            session.run(
+                """
+                MERGE (s:Species {scientific_name: $scientific_name})
+                MERGE (leaf:Taxon {name: $name, rank: $rank})
+                MERGE (s)-[:IN_TAXON]->(leaf)
+                """,
+                scientific_name=scientific_name,
+                name=lowest_name,
+                rank=lowest_rank,
+            )
+            for i in range(len(ranks) - 1):
+                parent_rank, parent_name = ranks[i]
+                child_rank, child_name = ranks[i + 1]
+                session.run(
+                    """
+                    MERGE (parent:Taxon {name: $parent_name, rank: $parent_rank})
+                    MERGE (child:Taxon {name: $child_name, rank: $child_rank})
+                    MERGE (parent)-[:PARENT_OF]->(child)
+                    """,
+                    parent_name=parent_name,
+                    parent_rank=parent_rank,
+                    child_name=child_name,
+                    child_rank=child_rank,
+                )
+
     def upsert_species(self, data: dict) -> None:
         # Separate scalar properties from relationship data
         props = {

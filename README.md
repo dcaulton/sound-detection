@@ -6,14 +6,16 @@ A production-leaning, local-first bioacoustics platform for continuous wildlife 
 
 Sound Detection ingests audio from edge recorders (primarily AudioMoth), runs them through a multi-stage ML pipeline, and turns raw detections into meaningful ecological insights.
 
-Recent work added **BiomeSummaryService** — an automated narrative generator that produces long-form, human-readable reports about bird activity over a time window, complete with species enrichment via RAG and LangChain.
+Recent work added a **criteria-driven BiomeSummaryService**. Species are filtered and scored against a user-supplied taxonomy criteria (any rank, any clade, or none) instead of a fixed list of bird families. Confirmed detections (BirdNET + Perch agreement) drive the primary narrative; single-analyzer detections are treated as speculated.
 
 ## Key Features
 
 - **Audio ingestion & detection pipeline** — Handles continuous recordings from multiple AudioMoth devices.
 - **Species knowledge graph** — Neo4j-backed knowledge base with structured data (range, habitat, diet, interesting facts) + Wikipedia RAG chunks.
-- **Sliding-scale filtering** — Intelligent filtering of common vs. notable species based on detection volume.
-- **LangChain-powered enrichment** — Per-species contextual summaries + full narrative report generation.
+- **Taxonomy hierarchy** — GBIF rank harvesting with `PARENT_OF` edges so every species carries its ancestry.
+- **Criteria-driven filtering & scoring** — `in_scope` and `interest_weight` applied to the ancestry chain; no hardcoded species groups.
+- **Confirmed vs. speculated detections** — Primary buckets use multi-model agreement counts; single-analyzer rows are secondary.
+- **LangChain-powered enrichment** — Per-species contextual summaries + dual narratives (machine + human-readable).
 - **Local-first architecture** — Designed to run on-prem or at the edge with minimal cloud dependency.
 - **FastAPI + async SQLAlchemy** — Modern, type-safe backend.
 - **Kubernetes-ready** — Runs on MicroK8s with Traefik, Postgres, Neo4j, and MLflow.
@@ -40,19 +42,20 @@ Recording ingestion → Detection pipeline
 PostgreSQL (detections, recordings, sites)
        ↓
 BiomeSummaryService
-   ├── Phase 1: Gather + Filter (sliding scale)
+   ├── Phase 1: Gather + Filter (ancestry + criteria)
    ├── Phase 2: Species Enrichment (Retriever + LangChain)
    └── Phase 3: Narrative Generation (LangChain)
        ↓
-Neo4j (species knowledge + RAG chunks)
+Neo4j (species knowledge + RAG chunks + taxonomy edges)
        ↓
 Rich ecological narrative reports
 ```
 
-## Project Status (June 2026)
+## Project Status (October 2026)
 
 - Core detection pipeline is stable and running in production on real hardware.
-- `BiomeSummaryService` with full LangChain RAG + narrative generation is implemented and tested.
+- BiomeSummaryService uses criteria-driven clade scoring and dual narratives.
+- Taxonomy edges (GBIF ranks, `PARENT_OF`) are populated for known species.
 - Strong emphasis on local/self-hosted operation and data ownership.
 - Actively used for ongoing beekeeping + native prairie restoration monitoring.
 
@@ -64,86 +67,16 @@ This project is approaching a state where it can be shared more broadly as both 
 - **Yard Sage** — LangGraph agent for generating biome reports from Obsidian notes + local weather data.
 - **Frigate + AudioMoth integration** — Real-time event detection and LLM-assisted classification.
 
-## Getting started
+## Getting Started (Coming Soon)
 
-### 1. Temp disk (required for day-length files)
-
-Uploads and ffmpeg segments are written under `AUDIO_TMP_ROOT`.
-That path must be a **real disk**, not tmpfs `/tmp`.
-
-```bash
-# .env
-AUDIO_TMP_ROOT=/home/dcaulton/data/sound-detection-tmp
-```
-
-```bash
-mkdir -p "$AUDIO_TMP_ROOT"
-df -h "$AUDIO_TMP_ROOT"
-```
-
-You want tens of GB free. A 24h FLAC is ~10GB; analysis also writes
-15-minute WAV segments next to it until that recording finishes.
-
-On startup the API logs `tmp=...`. If that path is `/tmp` and
-`df -hT /tmp` shows `tmpfs`, large uploads will sit in RAM.
-
-### 2. Services
-
-```bash
-docker compose up -d postgres   # and neo4j if you use the graph
-make dev                        # uvicorn --reload
-```
-
-Open http://127.0.0.1:8000/docs
-
-`make dev` is the local entrypoint, not `uv run dev`.
-```
-
-Adjust the example path if yours differs.
-
+Full setup instructions, Docker Compose / Kubernetes manifests, and model deployment guides will be added as the project stabilizes for wider use.
 
 ## Author
 
 Dave Caulton — Senior Software / ML Engineer  
-Hinsdale, Illinois
 
 Building tools for ecological monitoring, local AI, and self-reliant systems.
 
-## Perch model weights (not in git)
-
-Perch v2 SavedModel files are **not** committed (they exceed GitHub’s file size limits).
-
-Place the **CPU** Perch v2 model under:
-
-```text
-src/sound_detection/ml/perch/
-  saved_model.pb
-  variables/
-  assets/
-    labels.csv
-    perch_v2_ebird_classes.csv   # optional
 ---
 
-## Offline: merge AudioMoth day files
-
-AudioMoth (and similar) often produce many short WAVs named `YYYYMMDD_HHMMSS.WAV`.
-Before bulk upload, compact each calendar day into one time-aligned FLAC with
-digital silence in the gaps so detection timestamps stay correct.
-
-**Run on the uploader/workstation** (needs `ffmpeg` only on the API side for
-segmenting; this script uses `soundfile` + `numpy`):
-
-```bash
-# preview
-uv run python bin/merge_audiomoth_days.py /path/to/raw_wavs --dry-run
-
-# write FLACs next to source
-uv run python bin/merge_audiomoth_days.py /path/to/raw_wavs
-
-# custom output + overwrite
-uv run python bin/merge_audiomoth_days.py /path/to/raw_wavs \
-  --output-dir /path/to/merged \
-  --force
-
 *This project is under active development. Feedback and collaboration welcome.*
-

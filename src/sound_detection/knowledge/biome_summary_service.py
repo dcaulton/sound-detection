@@ -24,8 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording
+from sound_detection.knowledge.grading_criteria import (
+    DEFAULT_CRITERIA,
+    get_interest_weight,
+    in_scope,
+)
 from sound_detection.knowledge.rag.retriever import Retriever
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
+from sound_detection.knowledge.taxonomy import ancestry_names
 
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
@@ -50,54 +56,13 @@ NON_SPECIES_LABELS = {
     # add more as we discover them
 }
 
-SPECIES_GROUPS = {
-    # Owls
-    "bubo": "owl",
-    "strix": "owl",
-    "megascops": "owl",
-    "asio": "owl",
-    "aegolius": "owl",
-    "otus": "owl",
-    "tyto": "owl",
-    "surnia": "owl",
-    # Raptors (hawks, eagles, falcons, kites, etc.)
-    "buteo": "raptor",
-    "accipiter": "raptor",
-    "haliaeetus": "raptor",
-    "circus": "raptor",
-    "pandion": "raptor",
-    "falco": "raptor",
-    "aquila": "raptor",
-    "elanus": "raptor",
-    "ictinia": "raptor",
-    "cathartes": "raptor",  # Turkey Vulture
-    "coragyps": "raptor",  # Black Vulture
-    # Hummingbirds
-    "archilochus": "hummingbird",
-    "selasphorus": "hummingbird",
-    "calypte": "hummingbird",
-    "amazilia": "hummingbird",
-    "cynanthus": "hummingbird",
-}
 
-HIGH_INTEREST_SPECIES = {
-    "tympanuchus cupido",
-    "tympanuchus pallidicinctus",
-    "bartramia longicauda",
-    "dolichonyx oryzivorus",
-    "sturnella magna",
-    "sturnella neglecta",
-    "circus hudsonius",
-    "asio flammeus",
-}
-
-
-class ScoredSpecies(TypedDict):
+class ScoredTaxon(TypedDict):
     scientific_name: str
     common_name: str
     count: int
     score: float
-    group: str | None
+    clade: str | None
     context: dict[str, Any]
 
 
@@ -128,48 +93,24 @@ def get_species_image(scientific_name: str) -> str | None:
     return None
 
 
-def get_species_group(scientific_name: str) -> str | None:
-    """Return the group (owl / raptor / hummingbird) or None."""
-    if not scientific_name:
-        return None
-    genus = scientific_name.split()[0].lower()
-    return SPECIES_GROUPS.get(genus)
-
-
-def score_species(
+def score_taxon(
     scientific_name: str,
     count: int,
     context: dict[str, Any] | None = None,
     current_month: int | None = None,
 ) -> float:
-    """
-    Deterministic interestingness score.
-    Higher = more worth highlighting in the summary.
-    """
+    """Deterministic interestingness score. Higher = more worth highlighting."""
     context = context or {}
-    name_lower = scientific_name.lower()
     score = 0.0
 
     if current_month is None:
         current_month = datetime.now().month
 
-    # 1. Frequency (log scale, capped)
     score += min(math.log1p(count) * 2.5, 12.0)
 
-    # 2. Special groups
-    group = get_species_group(scientific_name)
-    if group == "owl":
-        score += 9.0
-    elif group == "raptor":
-        score += 8.0
-    elif group == "hummingbird":
-        score += 7.0
+    weight = float(context.get("interest_weight") or 1.0)
+    score *= weight
 
-    # 3. Explicit high-interest / indicator list
-    if name_lower in HIGH_INTEREST_SPECIES:
-        score += 14.0
-
-    # 4. Residency / expected presence
     if context.get("recorded_in_illinois") is False:
         score += 6.0
 
@@ -179,31 +120,28 @@ def score_species(
     if "migrant" in residency:
         score += 2.0
 
-    # 5. Seasonality - unexpected for current month
     peak_months: list[int] = context.get("migration_peak_months") or context.get("peak_months") or []
     if peak_months and current_month not in peak_months:
-        # Present outside its normal peak window
         score += 4.0
 
-    # 6. Indicator flag from Neo4j
     if context.get("is_indicator") or context.get("indicator_for_habitats"):
         score += 7.0
 
     return round(score, 2)
 
 
-def bucket_species(
-    species_counts: dict[str, int],
-    species_contexts: dict[str, dict[str, Any]],
+def bucket_taxa(
+    taxon_counts: dict[str, int],
+    taxon_contexts: dict[str, dict[str, Any]],
     current_month: int | None = None,
-) -> dict[str, list[ScoredSpecies]]:
-    scored: list[ScoredSpecies] = []
-    for name, count in species_counts.items():
+) -> dict[str, list[ScoredTaxon]]:
+    scored: list[ScoredTaxon] = []
+    for name, count in taxon_counts.items():
         if count <= 1:
             continue
 
-        context = species_contexts.get(name, {})
-        score = score_species(name, count, context, current_month)
+        context = taxon_contexts.get(name, {})
+        score = score_taxon(name, count, context, current_month)
         common_name = context.get("common_name") or ""
 
         scored.append(
@@ -212,7 +150,7 @@ def bucket_species(
                 "common_name": common_name,
                 "count": count,
                 "score": score,
-                "group": get_species_group(name),
+                "clade": context.get("matched_clade"),
                 "context": context,
             }
         )
@@ -223,7 +161,6 @@ def bucket_species(
     return {
         "table_rows": by_count,
         "high_interest": [s for s in by_score if s["score"] >= 12][:12],
-        "raptors_owls_hummingbirds": [s for s in by_score if s["group"] in ("owl", "raptor", "hummingbird")],
         "rare_vagrant": [
             s
             for s in by_score
@@ -256,11 +193,10 @@ class BiomeSummaryService:
 
     **Structure to follow:**
     1. Overall soundscape - what was actually common and dominant
-    2. Raptors, owls and hummingbirds - comment on diversity when present
-    3. High-interest and indicator species
-    4. Rare or unexpected species
-    5. Brief ecological observations and closing
-    6. Unconfirmed / single-analyzer detections (brief, cautious)
+    2. High-interest and indicator species
+    3. Rare or unexpected species
+    4. Brief ecological observations and closing
+    5. Unconfirmed / single-analyzer detections (brief, cautious)
 
     **Important:**
     - Balance common/dominant species with rare and high-interest ones.
@@ -284,9 +220,6 @@ class BiomeSummaryService:
     Confirmed rare / unexpected:
     {rare_text}
 
-    Confirmed special groups:
-    {group_highlight}
-
     Speculated (mention cautiously, if at all):
     {speculated_text}
 
@@ -294,12 +227,14 @@ class BiomeSummaryService:
         )
         return prompt | llm | StrOutputParser()
 
-    async def create_summary_job(self, site_id: UUID, window_days: int = 30) -> UUID:
-        """Creates a pending summary job and returns the ID immediately."""
+    async def create_summary_job(
+        self, site_id: UUID, window_days: int = 30, criteria: dict[str, Any] | None = None
+    ) -> UUID:
         summary = BiomeSummary(
             site_id=site_id,
             window_days=window_days,
             status="pending",
+            criteria=criteria,
         )
         self.session.add(summary)
         await self.session.commit()
@@ -314,6 +249,7 @@ class BiomeSummaryService:
             log.warning(f"Summary {summary_id} not found")
             return
 
+        criteria = summary.criteria or DEFAULT_CRITERIA
         start_time = datetime.now(UTC)
         log.info(f"[{summary_id}] Starting biome summary generation (window: {summary.window_days} days)")
 
@@ -329,7 +265,7 @@ class BiomeSummaryService:
                 speculated_counts,
                 confirmed_species,
                 speculated_species,
-            ) = await self._gather_and_filter_species(summary)
+            ) = await self._gather_and_filter_species(summary, criteria)
 
             # Optional: still expose a combined total for old consumers
             species_counts = {
@@ -365,6 +301,7 @@ class BiomeSummaryService:
                 speculated_counts=speculated_counts,
                 enriched_speculated_species=enriched_speculated_species,
                 window_days=summary.window_days,
+                criteria=criteria,
             )
             summary.narrative = machine_narrative
             summary.human_narrative = human_narrative
@@ -444,7 +381,7 @@ class BiomeSummaryService:
         return True
 
     async def _gather_and_filter_species(
-        self, summary: BiomeSummary
+        self, summary: BiomeSummary, criteria: dict[str, Any]
     ) -> tuple[dict[str, int], dict[str, int], list[dict], list[dict]]:
         """
         Returns:
@@ -520,28 +457,20 @@ class BiomeSummaryService:
 
         def _passes_filters(name: str, count: int, *, drop_singles: bool) -> bool:
             name_lower = name.lower().strip()
-
-            # 1. Skip known non-species labels
             if name_lower in NON_SPECIES_LABELS:
                 return False
-
-            # 2. Skip single-observation detections (likely false positives)
-            #    Confirmed events skip this: one agreement is already strong signal
-            if drop_singles and count <= 1:
+            min_signals = criteria["confirmation"]["min_signals"]
+            if drop_singles and count < min_signals:
                 return False
-
-            # 3. Require it to look roughly like a scientific name
             if " " not in name or not name[0].isupper():
                 return False
-
-            # this is a little too agressive for now, and messes up multitenancy.
-            # TODO: have a user or site setting drive this later
-            # context = species_contexts.get(name, {})
-            # recorded_in_illinois = context.get("recorded_in_illinois", False)
-            # if not recorded_in_illinois:
-            #     return False
-
-            return True
+            if self.neo4j_driver is None:
+                return True
+            chain = ancestry_names(self.neo4j_driver, name)
+            if not chain:
+                log.warning(f"No taxonomy ancestry for {name}")
+                return True
+            return in_scope(chain, criteria)
 
         confirmed_species: list[dict] = []
         for name, count in confirmed_counts.items():
@@ -713,10 +642,10 @@ Structured summary:"""
         )
         return prompt | llm | StrOutputParser()
 
-    def _add_species_table(self, doc: DocumentObject, table_rows: list[ScoredSpecies]) -> None:
+    def _add_taxon_table(self, doc: DocumentObject, table_rows: list[ScoredTaxon]) -> None:
         """Add a properly formatted Word table."""
         if not table_rows:
-            doc.add_paragraph("No species with more than one detection.")
+            doc.add_paragraph("No taxons with more than one detection.")
             return
 
         table = doc.add_table(rows=1, cols=4)
@@ -788,7 +717,7 @@ Structured summary:"""
         doc.add_heading("Species Detected (more than one detection)", level=1)
 
         table_rows = summary.get("species_table") or []
-        self._add_species_table(doc, table_rows)
+        self._add_taxon_table(doc, table_rows)
 
         # ----- Notable Species with Images -----
         images = summary.get("notable_species_images") or []
@@ -860,7 +789,8 @@ Structured summary:"""
         speculated_counts: dict[str, int],
         enriched_speculated_species: list[dict],
         window_days: int,
-    ) -> tuple[str, str, list[dict[str, Any]], list[ScoredSpecies]]:
+        criteria: dict[str, Any],
+    ) -> tuple[str, str, list[dict[str, Any]], list[ScoredTaxon]]:
         """
         Returns:
             (machine_narrative, human_narrative, notable_species_images, species_table)
@@ -876,39 +806,23 @@ Structured summary:"""
         for name in set(confirmed_counts) | set(speculated_counts):
             species_contexts.setdefault(name, {})
 
+        if self.neo4j_driver is not None:
+            for name, ctx in species_contexts.items():
+                chain = ancestry_names(self.neo4j_driver, name)
+                ctx["interest_weight"] = get_interest_weight(chain, criteria)
+                ctx["ancestry"] = chain
+                interest = criteria.get("clades_of_interest") or {}
+                for clade in interest:
+                    if clade.lower() in {n.lower() for n in chain}:
+                        ctx["matched_clade"] = clade
+                        break
         # ----- Score & bucket on CONFIRMED only (hard-won signal) -----
-        buckets = bucket_species(confirmed_counts, species_contexts)
+        buckets = bucket_taxa(confirmed_counts, species_contexts)
 
         # Speculated: score for a short secondary list (still use same scorer)
-        speculated_buckets = bucket_species(speculated_counts, species_contexts)
+        speculated_buckets = bucket_taxa(speculated_counts, species_contexts)
 
-        # ----- Group highlight (confirmed) -----
-        group_parts = []
-        for group_key, label in [
-            ("owl", "Owls"),
-            ("raptor", "Raptors"),
-            ("hummingbird", "Hummingbirds"),
-        ]:
-            members = [r for r in buckets["raptors_owls_hummingbirds"] if r["group"] == group_key]
-            if not members:
-                continue
-            names = []
-            for m in members:
-                common = m["common_name"] or ""
-                sci = m["scientific_name"]
-                if common:
-                    names.append(f"{common} (*{sci}*)")
-                else:
-                    names.append(f"*{sci}*")
-            group_parts.append(f"{label}: {len(members)} species ({', '.join(names)})")
-
-        group_highlight = (
-            "\n".join(group_parts)
-            if group_parts
-            else "No major raptor, owl, or hummingbird diversity noted among confirmed detections."
-        )
-
-        def format_species_list(rows: list[ScoredSpecies], limit: int = 8) -> str:
+        def format_species_list(rows: list[ScoredTaxon], limit: int = 8) -> str:
             parts = []
             for r in rows[:limit]:
                 common = r["common_name"] or ""
@@ -929,7 +843,6 @@ Structured summary:"""
             "window_days": window_days,
             "total_confirmed_species": len(confirmed_counts),
             "total_speculated_species": len(speculated_counts),
-            "group_highlight": group_highlight,
             "high_interest_text": high_interest_text,
             "dominant_text": dominant_text,
             "rare_text": rare_text,
@@ -986,7 +899,6 @@ Structured summary:"""
 
         dominant = by_count[:8]
         high_interest = [s for s in by_score if s.get("score", 0) >= 12][:10]
-        group_members = [s for s in by_score if s.get("group") in ("owl", "raptor", "hummingbird")]
         rare = [s for s in by_score if s.get("count", 0) <= 4 and s.get("score", 0) >= 10][:8]
 
         def fmt(rows: list[dict]) -> str:
@@ -1001,18 +913,6 @@ Structured summary:"""
                 lines.append(f"- {common} (*{sci}*): {count} detections (score {score})")
             return "\n".join(lines)
 
-        # Group highlight
-        group_lines = []
-        for key, label in [("owl", "Owls"), ("raptor", "Raptors"), ("hummingbird", "Hummingbirds")]:
-            members = [s for s in group_members if s.get("group") == key]
-            if members:
-                names = [
-                    f"{s.get('common_name') or s.get('scientific_name')} (*{s.get('scientific_name')}*)"
-                    for s in members
-                ]
-                group_lines.append(f"- {label} ({len(members)}): {', '.join(names)}")
-        group_highlight = "\n".join(group_lines) if group_lines else "- None noted"
-
         package = f"""# Biome Summary Data Package
     Site ID: {summary.site_id}
     Window: last {summary.window_days} days
@@ -1024,9 +924,6 @@ Structured summary:"""
 
     ## High-Interest & Indicator Species
     {fmt(high_interest)}
-
-    ## Raptors, Owls & Hummingbirds
-    {group_highlight}
 
     ## Rare / Unexpected Species
     {fmt(rare)}

@@ -1,0 +1,26 @@
+# Example grading criteria for a prairie / oak savanna site.
+# Empty clades_of_interest means no charismatic bias.
+# Add entries only for things you actually want amplified.
+
+clades_to_consider: all
+
+clades_of_interest:
+  # Prairie specialists
+  Tympanuchus:
+    weight: 2.5
+  Sturnella:
+    weight: 1.8
+  # Orthoptera (grasshoppers, crickets) if you start detecting them
+  Orthoptera:
+    weight: 1.5
+  # Single species treated as a clade of size 1
+  Turdus migratorius:
+    weight: 0.5
+
+proximity:
+  source: inaturalist
+  radius_miles: 100
+  quality_grade: research
+
+confirmation:
+  min_signals: 2

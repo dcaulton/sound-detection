@@ -137,6 +137,7 @@ class BiomeSummary(SQLModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     site_id: uuid.UUID = Field(foreign_key="site.id", index=True)  # ← Multi-tenant key
+    criteria: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON, nullable=True))
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     window_days: int = Field(default=30)
