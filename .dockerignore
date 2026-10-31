@@ -1,0 +1,12 @@
+.venv
+.git
+.github
+.pytest_cache
+.ruff_cache
+.mypy_cache
+tests
+data
+*.md
+.env
+src/sound_detection/ml/perch/variables
+src/sound_detection/ml/perch/*.pb

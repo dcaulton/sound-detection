@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16
@@ -43,3 +41,4 @@ volumes:
   sound_detection_postgres_data:
   neo4j_data:
   neo4j_logs:
+  sound_detection_audio_tmp:
