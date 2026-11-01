@@ -1,9 +1,8 @@
-import math
 import tempfile
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 from uuid import UUID
 
 import requests
@@ -27,42 +26,15 @@ from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recor
 from sound_detection.knowledge.grading_criteria import (
     DEFAULT_CRITERIA,
     get_interest_weight,
-    in_scope,
 )
 from sound_detection.knowledge.rag.retriever import Retriever
+from sound_detection.knowledge.scoring import ScoredTaxon, bucket_taxa, passes_filters
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
 from sound_detection.knowledge.taxonomy import ancestry_names
 
 log = structlog.get_logger(__name__)
 
 llm = ChatOllama(model="qwen2.5:32b", temperature=0.3)
-
-NON_SPECIES_LABELS = {
-    "power tools",
-    "fireworks",
-    "engine",
-    "human vocal",
-    "gun",
-    "siren",
-    "dog",
-    "cat",
-    "vehicle",
-    "airplane",
-    "helicopter",
-    "chainsaw",
-    "lawn mower",
-    "human non-vocal",
-    # add more as we discover them
-}
-
-
-class ScoredTaxon(TypedDict):
-    scientific_name: str
-    common_name: str
-    count: int
-    score: float
-    clade: str | None
-    context: dict[str, Any]
 
 
 def get_species_image(scientific_name: str) -> str | None:
@@ -90,83 +62,6 @@ def get_species_image(scientific_name: str) -> str | None:
     except Exception as e:
         log.exception(f"Image fetch failed for {scientific_name}: {e}")
     return None
-
-
-def score_taxon(
-    scientific_name: str,
-    count: int,
-    context: dict[str, Any] | None = None,
-    current_month: int | None = None,
-) -> float:
-    """Deterministic interestingness score. Higher = more worth highlighting."""
-    context = context or {}
-    score = 0.0
-
-    if current_month is None:
-        current_month = datetime.now().month
-
-    score += min(math.log1p(count) * 2.5, 12.0)
-
-    weight = float(context.get("interest_weight") or 1.0)
-    score *= weight
-
-    if context.get("recorded_in_illinois") is False:
-        score += 6.0
-
-    residency = (context.get("residency_status") or "").lower()
-    if any(k in residency for k in ("vagrant", "rare", "accidental")):
-        score += 5.0
-    if "migrant" in residency:
-        score += 2.0
-
-    peak_months: list[int] = context.get("migration_peak_months") or context.get("peak_months") or []
-    if peak_months and current_month not in peak_months:
-        score += 4.0
-
-    if context.get("is_indicator") or context.get("indicator_for_habitats"):
-        score += 7.0
-
-    return round(score, 2)
-
-
-def bucket_taxa(
-    taxon_counts: dict[str, int],
-    taxon_contexts: dict[str, dict[str, Any]],
-    current_month: int | None = None,
-) -> dict[str, list[ScoredTaxon]]:
-    scored: list[ScoredTaxon] = []
-    for name, count in taxon_counts.items():
-        if count <= 1:
-            continue
-
-        context = taxon_contexts.get(name, {})
-        score = score_taxon(name, count, context, current_month)
-        common_name = context.get("common_name") or ""
-
-        scored.append(
-            {
-                "scientific_name": name,
-                "common_name": common_name,
-                "count": count,
-                "score": score,
-                "clade": context.get("matched_clade"),
-                "context": context,
-            }
-        )
-
-    by_score = sorted(scored, key=lambda x: x["score"], reverse=True)
-    by_count = sorted(scored, key=lambda x: x["count"], reverse=True)
-
-    return {
-        "table_rows": by_count,
-        "high_interest": [s for s in by_score if s["score"] >= 12][:12],
-        "rare_vagrant": [
-            s
-            for s in by_score
-            if s["count"] <= 4 and (s["context"].get("recorded_in_illinois") is False or s["score"] >= 10)
-        ][:10],
-        "dominant": by_count[:8],
-    }
 
 
 class BiomeSummaryService:
@@ -498,27 +393,13 @@ class BiomeSummaryService:
                 if context:
                     species_contexts[name] = context
 
-        def _passes_filters(name: str, count: int, *, drop_singles: bool) -> bool:
-            name_lower = name.lower().strip()
-            if name_lower in NON_SPECIES_LABELS:
-                return False
-            min_signals = criteria["confirmation"]["min_signals"]
-            if drop_singles and count < min_signals:
-                return False
-            if " " not in name or not name[0].isupper():
-                return False
-            if self.neo4j_driver is None:
-                return True
-            chain = ancestry_names(self.neo4j_driver, name)
-            if not chain:
-                log.warning("no_taxonomy_ancestry", species=name)
-                return True
-            return in_scope(chain, criteria)
-
         confirmed_species: list[dict] = []
         for name, count in confirmed_counts.items():
-            if not _passes_filters(name, count, drop_singles=False):
+            if not passes_filters(name, count, criteria, self.neo4j_driver, drop_singles=False):
                 continue
+            # Log missing ancestry for visibility (passes_filters treats it as in-scope)
+            if self.neo4j_driver is not None and not ancestry_names(self.neo4j_driver, name):
+                log.warning("no_taxonomy_ancestry", species=name)
             confirmed_species.append(
                 {
                     "scientific_name": name,
@@ -530,8 +411,10 @@ class BiomeSummaryService:
 
         speculated_species: list[dict] = []
         for name, count in speculated_counts.items():
-            if not _passes_filters(name, count, drop_singles=True):
+            if not passes_filters(name, count, criteria, self.neo4j_driver, drop_singles=True):
                 continue
+            if self.neo4j_driver is not None and not ancestry_names(self.neo4j_driver, name):
+                log.warning("no_taxonomy_ancestry", species=name)
             speculated_species.append(
                 {
                     "scientific_name": name,
