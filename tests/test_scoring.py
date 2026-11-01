@@ -1,10 +1,9 @@
-"""Unit tests for scoring and filtering helpers."""
+"""Unit tests for scoring helpers."""
 
 from typing import Any
 
 from sound_detection.knowledge.scoring import (
     bucket_taxa,
-    passes_filters,
     score_taxon,
 )
 
@@ -21,25 +20,6 @@ def test_score_taxon_vagrant_bonus() -> None:
     base = score_taxon("Rare Bird", 5, {"residency_status": "resident"})
     vagrant = score_taxon("Rare Bird", 5, {"residency_status": "vagrant"})
     assert vagrant > base
-
-
-def test_passes_filters_drops_non_species() -> None:
-    criteria = {"confirmation": {"min_signals": 2}, "clades_to_consider": "all"}
-    assert not passes_filters("dog", 5, criteria, drop_singles=False)
-    assert not passes_filters("power tools", 3, criteria, drop_singles=False)
-
-
-def test_passes_filters_requires_binomial() -> None:
-    criteria = {"confirmation": {"min_signals": 2}}
-    assert not passes_filters("robin", 5, criteria)  # no space / not capitalized
-    assert passes_filters("Turdus migratorius", 5, criteria, neo4j_driver=None)
-
-
-def test_passes_filters_min_signals() -> None:
-    criteria = {"confirmation": {"min_signals": 3}}
-    assert passes_filters("Turdus migratorius", 1, criteria, drop_singles=False)
-    assert not passes_filters("Turdus migratorius", 1, criteria, drop_singles=True)
-    assert passes_filters("Turdus migratorius", 5, criteria, drop_singles=True)
 
 
 def test_bucket_taxa_skips_singles_and_sorts() -> None:

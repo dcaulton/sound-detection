@@ -1,4 +1,4 @@
-"""Scoring, bucketing, and filtering for biome summaries.
+"""Scoring and bucketing for biome summaries.
 
 Kept separate from BiomeSummaryService so the service can stay focused on
 orchestration (SQL → enrich → narrate → persist).
@@ -9,29 +9,6 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from typing import Any, TypedDict
-
-from neo4j import Driver
-
-from sound_detection.knowledge.grading_criteria import in_scope
-from sound_detection.knowledge.taxonomy import ancestry_names
-
-NON_SPECIES_LABELS = {
-    "power tools",
-    "fireworks",
-    "engine",
-    "human vocal",
-    "gun",
-    "siren",
-    "dog",
-    "cat",
-    "vehicle",
-    "airplane",
-    "helicopter",
-    "chainsaw",
-    "lawn mower",
-    "human non-vocal",
-    # add more as we discover them
-}
 
 
 class ScoredTaxon(TypedDict):
@@ -118,39 +95,3 @@ def bucket_taxa(
         ][:10],
         "dominant": by_count[:8],
     }
-
-
-def passes_filters(
-    name: str,
-    count: int,
-    criteria: dict[str, Any],
-    neo4j_driver: Driver | None = None,
-    *,
-    drop_singles: bool = False,
-) -> bool:
-    """True if the species should be kept for enrichment / scoring.
-
-    Drop non-species labels, enforce min_signals when requested,
-    require a binomial scientific name, and optionally check taxonomy scope.
-    """
-    name_lower = name.lower().strip()
-    if name_lower in NON_SPECIES_LABELS:
-        return False
-
-    min_signals = (criteria.get("confirmation") or {}).get("min_signals", 2)
-    if drop_singles and count < min_signals:
-        return False
-
-    if " " not in name or not name[0].isupper():
-        return False
-
-    if neo4j_driver is None:
-        return True
-
-    chain = ancestry_names(neo4j_driver, name)
-    if not chain:
-        # Caller may log; we treat missing ancestry as in-scope so we don't
-        # silently drop species whose taxonomy hasn't been backfilled yet.
-        return True
-
-    return in_scope(chain, criteria)

@@ -20,11 +20,10 @@ from sound_detection.knowledge.biome_narratives import (
     enrich_species,
     generate_narratives,
 )
+from sound_detection.knowledge.filtering import filter_species
 from sound_detection.knowledge.grading_criteria import DEFAULT_CRITERIA
 from sound_detection.knowledge.rag.retriever import Retriever
-from sound_detection.knowledge.scoring import passes_filters
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
-from sound_detection.knowledge.taxonomy import ancestry_names
 
 log = structlog.get_logger(__name__)
 
@@ -324,36 +323,13 @@ class BiomeSummaryService:
                 if context:
                     species_contexts[name] = context
 
-        confirmed_species: list[dict] = []
-        for name, count in confirmed_counts.items():
-            if not passes_filters(name, count, criteria, self.neo4j_driver, drop_singles=False):
-                continue
-            # Log missing ancestry for visibility (passes_filters treats it as in-scope)
-            if self.neo4j_driver is not None and not ancestry_names(self.neo4j_driver, name):
-                log.warning("no_taxonomy_ancestry", species=name)
-            confirmed_species.append(
-                {
-                    "scientific_name": name,
-                    "count": count,
-                    "confirmation": "confirmed",
-                    "context": species_contexts.get(name, {}),
-                }
-            )
-
-        speculated_species: list[dict] = []
-        for name, count in speculated_counts.items():
-            if not passes_filters(name, count, criteria, self.neo4j_driver, drop_singles=True):
-                continue
-            if self.neo4j_driver is not None and not ancestry_names(self.neo4j_driver, name):
-                log.warning("no_taxonomy_ancestry", species=name)
-            speculated_species.append(
-                {
-                    "scientific_name": name,
-                    "count": count,
-                    "confirmation": "speculated",
-                    "context": species_contexts.get(name, {}),
-                }
-            )
+        confirmed_species, speculated_species = filter_species(
+            confirmed_counts,
+            speculated_counts,
+            species_contexts,
+            criteria,
+            neo4j_driver=self.neo4j_driver,
+        )
 
         log.info(
             "filtering_complete",
