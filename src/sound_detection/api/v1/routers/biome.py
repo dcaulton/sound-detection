@@ -32,6 +32,7 @@ class CreateSummaryRequest(BaseModel):
     site_id: UUID
     window_days: int = Field(default=30, ge=1, le=365)
     criteria: dict[str, Any] | None = None
+    dry_run: bool = Field(default=False, description="Stop after Phase 1 filtering; skip enrichment and narratives")
 
 
 @router.post("/summary")
@@ -45,11 +46,13 @@ async def create_summary(
         site_id=body.site_id,
         window_days=body.window_days,
         criteria=body.criteria,
+        dry_run=body.dry_run,
     )
     background_tasks.add_task(run_generate_summary, summary_id)
     return {
         "status": "started",
         "summary_id": str(summary_id),
+        "dry_run": body.dry_run,
         "message": "Summary generation started. Poll the status using GET /biome/summaries/{id}",
     }
 

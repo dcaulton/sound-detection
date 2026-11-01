@@ -1,6 +1,4 @@
-import logging
 import math
-import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -9,6 +7,7 @@ from typing import Any, TypedDict
 from uuid import UUID
 
 import requests
+import structlog
 from docx import Document
 from docx.document import Document as DocumentObject
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -23,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
+from sound_detection.core.concurrency import analysis_semaphore
 from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording
 from sound_detection.knowledge.grading_criteria import (
     DEFAULT_CRITERIA,
@@ -33,8 +33,7 @@ from sound_detection.knowledge.rag.retriever import Retriever
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
 from sound_detection.knowledge.taxonomy import ancestry_names
 
-log = logging.getLogger(__name__)
-log.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+log = structlog.get_logger(__name__)
 
 llm = ChatOllama(model="qwen2.5:32b", temperature=0.3)
 
@@ -228,7 +227,7 @@ class BiomeSummaryService:
         return prompt | llm | StrOutputParser()
 
     async def create_summary_job(
-        self, site_id: UUID, window_days: int = 30, criteria: dict[str, Any] | None = None
+        self, site_id: UUID, window_days: int = 30, criteria: dict[str, Any] | None = None, dry_run: bool = False
     ) -> UUID:
         summary = BiomeSummary(
             site_id=site_id,
@@ -236,100 +235,141 @@ class BiomeSummaryService:
             status="pending",
             criteria=criteria,
         )
+        # Stash dry_run flag in criteria so the background task can see it without a schema change
+        if dry_run:
+            summary.criteria = {**(criteria or {}), "_dry_run": True}
         self.session.add(summary)
         await self.session.commit()
         await self.session.refresh(summary)
 
-        log.info(f"Created biome summary job {summary.id} for site {site_id}")
+        log.info("created_biome_summary_job", summary_id=str(summary.id), site_id=str(site_id), dry_run=dry_run)
         return summary.id
 
     async def generate_summary(self, summary_id: UUID) -> None:
-        summary = await self.session.get(BiomeSummary, summary_id)
-        if not summary:
-            log.warning(f"Summary {summary_id} not found")
-            return
+        async with analysis_semaphore:
+            summary = await self.session.get(BiomeSummary, summary_id)
+            if not summary:
+                log.warning("summary_not_found", summary_id=str(summary_id))
+                return
 
-        criteria = summary.criteria or DEFAULT_CRITERIA
-        start_time = datetime.now(UTC)
-        log.info(f"[{summary_id}] Starting biome summary generation (window: {summary.window_days} days)")
-
-        try:
-            summary.status = "processing"
-            await self.session.commit()
-
-            # === Phase 1: Data Gathering & Filtering ===
-            log.info(f"[{summary_id}] Phase 1: Gathering detections and filtering species...")
-            phase_start = datetime.now(UTC)
-            (
-                confirmed_counts,
-                speculated_counts,
-                confirmed_species,
-                speculated_species,
-            ) = await self._gather_and_filter_species(summary, criteria)
-
-            # Optional: still expose a combined total for old consumers
-            species_counts = {
-                name: confirmed_counts.get(name, 0) + speculated_counts.get(name, 0)
-                for name in set(confirmed_counts) | set(speculated_counts)
-            }
-            log.info(f"[{summary_id}] Phase 1 completed in {(datetime.now(UTC) - phase_start).seconds}s")
-
-            # === Phase 2: Per-Species Enrichment ===
-            phase_start = datetime.now(UTC)
+            criteria = dict(summary.criteria or DEFAULT_CRITERIA)
+            dry_run = bool(criteria.pop("_dry_run", False))
+            start_time = datetime.now(UTC)
             log.info(
-                f"[{summary_id}] Phase 2: Enriching {len(confirmed_species)} notable confirmed species "
-                + "with RAG + LLM..."
-            )
-            enriched_confirmed_species = await self._enrich_species(summary_id, confirmed_species, summary.window_days)
-            log.info(
-                f"[{summary_id}] Phase 2: Enriching {len(speculated_species)} notable speculated species "
-                + "with RAG + LLM..."
-            )
-            enriched_speculated_species = await self._enrich_species(
-                summary_id, speculated_species, summary.window_days
-            )
-
-            log.info(f"[{summary_id}] Phase 2 completed in {(datetime.now(UTC) - phase_start).seconds}s")
-
-            # === Phase 3: Narrative Generation ===
-            log.info(f"[{summary_id}] Phase 3: Generating final narrative...")
-            phase_start = datetime.now(UTC)
-            machine_narrative, human_narrative, images, species_table = await self._generate_narratives(
-                summary_id=summary.id,
-                confirmed_counts=confirmed_counts,
-                enriched_confirmed_species=enriched_confirmed_species,
-                speculated_counts=speculated_counts,
-                enriched_speculated_species=enriched_speculated_species,
+                "starting_biome_summary",
+                summary_id=str(summary_id),
                 window_days=summary.window_days,
-                criteria=criteria,
+                dry_run=dry_run,
             )
-            summary.narrative = machine_narrative
-            summary.human_narrative = human_narrative
-            summary.notable_species_images = images
-            summary.species_table = species_table  # type: ignore[assignment]
-            log.info(f"[{summary_id}] Phase 3 completed in {(datetime.now(UTC) - phase_start).seconds}s")
 
-            # Save final results
-            # TODO add speculated species and speculated species counts
-            summary.summary_json = {
-                "window_days": summary.window_days,
-                "total_detections": sum(species_counts.values()),
-                "total_species": len(confirmed_counts | speculated_counts),
-                "species_counts": confirmed_counts,
-                "notable_species": enriched_confirmed_species,
-                "generated_at": datetime.now(UTC).isoformat(),
-            }
-            summary.status = "completed"
+            try:
+                summary.status = "processing:phase1"
+                await self.session.commit()
 
-            duration = (datetime.now(UTC) - start_time).seconds
-            log.info(f"[{summary_id}] Summary generation completed successfully in {duration}s")
+                # === Phase 1: Data Gathering & Filtering ===
+                log.info("phase1_start", summary_id=str(summary_id))
+                phase_start = datetime.now(UTC)
+                (
+                    confirmed_counts,
+                    speculated_counts,
+                    confirmed_species,
+                    speculated_species,
+                ) = await self._gather_and_filter_species(summary, criteria)
 
-        except Exception as e:
-            summary.status = "failed"
-            summary.error_message = str(e)
-            log.exception(f"[{summary_id}] Summary generation failed")
-        finally:
-            await self.session.commit()
+                species_counts = {
+                    name: confirmed_counts.get(name, 0) + speculated_counts.get(name, 0)
+                    for name in set(confirmed_counts) | set(speculated_counts)
+                }
+                log.info(
+                    "phase1_complete",
+                    summary_id=str(summary_id),
+                    duration_s=(datetime.now(UTC) - phase_start).seconds,
+                    confirmed=len(confirmed_counts),
+                    speculated=len(speculated_counts),
+                )
+
+                if dry_run:
+                    summary.status = "dry_run_complete"
+                    summary.summary_json = {
+                        "window_days": summary.window_days,
+                        "dry_run": True,
+                        "confirmed_species_count": len(confirmed_counts),
+                        "speculated_species_count": len(speculated_counts),
+                        "confirmed_counts": confirmed_counts,
+                        "speculated_counts": speculated_counts,
+                        "confirmed_species": confirmed_species,
+                        "speculated_species": speculated_species,
+                        "generated_at": datetime.now(UTC).isoformat(),
+                    }
+                    duration = (datetime.now(UTC) - start_time).seconds
+                    log.info("dry_run_complete", summary_id=str(summary_id), duration_s=duration)
+                    return
+
+                # === Phase 2: Per-Species Enrichment ===
+                summary.status = "processing:phase2"
+                await self.session.commit()
+                phase_start = datetime.now(UTC)
+                log.info(
+                    "phase2_start",
+                    summary_id=str(summary_id),
+                    confirmed=len(confirmed_species),
+                    speculated=len(speculated_species),
+                )
+                enriched_confirmed_species = await self._enrich_species(
+                    summary_id, confirmed_species, summary.window_days
+                )
+                # skip enriching speculated species for now, it's very expensive
+                enriched_speculated_species: list[dict] = []
+                log.info(
+                    "phase2_complete",
+                    summary_id=str(summary_id),
+                    duration_s=(datetime.now(UTC) - phase_start).seconds,
+                )
+
+                # === Phase 3: Narrative Generation ===
+                summary.status = "processing:phase3"
+                await self.session.commit()
+                log.info("phase3_start", summary_id=str(summary_id))
+                phase_start = datetime.now(UTC)
+                machine_narrative, human_narrative, images, species_table = await self._generate_narratives(
+                    summary_id=summary.id,
+                    confirmed_counts=confirmed_counts,
+                    enriched_confirmed_species=enriched_confirmed_species,
+                    speculated_counts=speculated_counts,
+                    enriched_speculated_species=enriched_speculated_species,
+                    window_days=summary.window_days,
+                    criteria=criteria,
+                )
+                summary.narrative = machine_narrative
+                summary.human_narrative = human_narrative
+                summary.notable_species_images = images
+                summary.species_table = species_table  # type: ignore[assignment]
+                log.info(
+                    "phase3_complete",
+                    summary_id=str(summary_id),
+                    duration_s=(datetime.now(UTC) - phase_start).seconds,
+                )
+
+                # Save final results
+                summary.summary_json = {
+                    "window_days": summary.window_days,
+                    "total_detections": sum(species_counts.values()),
+                    "total_species": len(confirmed_counts | speculated_counts),
+                    "species_counts": confirmed_counts,
+                    "notable_species": enriched_confirmed_species,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+                summary.status = "completed"
+
+                duration = (datetime.now(UTC) - start_time).seconds
+                log.info("summary_complete", summary_id=str(summary_id), duration_s=duration)
+
+            except Exception as e:
+                summary.status = "failed"
+                summary.error_message = str(e)
+                log.exception("summary_failed", summary_id=str(summary_id))
+            finally:
+                await self.session.commit()
 
     async def list_summaries(self, site_id: UUID, limit: int = 20) -> list[dict]:
         stmt = (
@@ -390,7 +430,7 @@ class BiomeSummaryService:
             confirmed_species:  filtered list for enrichment (confirmation=confirmed)
             speculated_species: filtered list for enrichment (confirmation=speculated)
         """
-        log.info(f"[{summary.id}] Querying detections from last {summary.window_days} days...")
+        log.info("querying_detections", summary_id=str(summary.id), window_days=summary.window_days)
         cutoff = datetime.now(UTC) - timedelta(days=summary.window_days)
 
         # --- Confirmed: agreement events (distinct group ids per species) ---
@@ -437,14 +477,17 @@ class BiomeSummaryService:
                 speculated_counts[row.scientific_name] = int(row.count)  # type: ignore[call-overload]
 
         if not confirmed_counts and not speculated_counts:
-            log.info(f"[{summary.id}] No detections found in window.")
+            log.info("no_detections", summary_id=str(summary.id))
             return {}, {}, [], []
 
         all_counts = {**speculated_counts, **confirmed_counts}  # confirmed overwrites if both
         max_count = max(all_counts.values())
         log.info(
-            f"[{summary.id}] Found {len(confirmed_counts)} confirmed, "
-            f"{len(speculated_counts)} speculated species. Max count = {max_count}"
+            "detections_found",
+            summary_id=str(summary.id),
+            confirmed=len(confirmed_counts),
+            speculated=len(speculated_counts),
+            max_count=max_count,
         )
 
         # Get species context from Neo4j (union of names)
@@ -468,7 +511,7 @@ class BiomeSummaryService:
                 return True
             chain = ancestry_names(self.neo4j_driver, name)
             if not chain:
-                log.warning(f"No taxonomy ancestry for {name}")
+                log.warning("no_taxonomy_ancestry", species=name)
                 return True
             return in_scope(chain, criteria)
 
@@ -499,11 +542,12 @@ class BiomeSummaryService:
             )
 
         log.info(
-            f"[{summary.id}] After filtering: "
-            f"confirmed={len(confirmed_species)} "
-            f"(from {len(confirmed_counts)}), "
-            f"speculated={len(speculated_species)} "
-            f"(from {len(speculated_counts)})"
+            "filtering_complete",
+            summary_id=str(summary.id),
+            confirmed_after=len(confirmed_species),
+            confirmed_before=len(confirmed_counts),
+            speculated_after=len(speculated_species),
+            speculated_before=len(speculated_counts),
         )
 
         return confirmed_counts, speculated_counts, confirmed_species, speculated_species
@@ -539,10 +583,10 @@ class BiomeSummaryService:
 
     async def _enrich_species(self, summary_id: UUID, filtered_species: list[dict], window_days: int) -> list[dict]:
         if not self.retriever:
-            log.warning(f"[{summary_id}] No retriever available - skipping RAG step")
+            log.warning("no_retriever", summary_id=str(summary_id))
             return filtered_species
 
-        log.info(f"[{summary_id}] Enriching {len(filtered_species)} species using LangChain + RAG...")
+        log.info("enriching_species", summary_id=str(summary_id), count=len(filtered_species))
 
         chain = self._build_species_enrichment_chain()
         enriched = []
@@ -552,7 +596,7 @@ class BiomeSummaryService:
             count = species["count"]
             context = species.get("context", {})
 
-            log.info(f"[{summary_id}] → Enriching {name} ({count} detections)")
+            log.info("enriching_one", summary_id=str(summary_id), species=name, count=count)
 
             # Get top relevant chunks
             chunks = self.retriever.retrieve(name, top_k=self.chunks_per_species)
@@ -588,7 +632,7 @@ class BiomeSummaryService:
                 )
 
             except Exception as e:
-                log.warning(f"[{summary_id}] LLM enrichment failed for {name}: {e}")
+                log.warning("enrichment_failed", summary_id=str(summary_id), species=name, error=str(e))
                 enriched.append(
                     {
                         **species,
@@ -597,7 +641,7 @@ class BiomeSummaryService:
                     }
                 )
 
-        log.info(f"[{summary_id}] Finished enriching {len(enriched)} species with LangChain")
+        log.info("enrichment_complete", summary_id=str(summary_id), enriched=len(enriched))
         return enriched
 
     def _build_narrative_chain(self) -> Runnable:
@@ -631,9 +675,6 @@ Confirmed high-interest / indicator:
 
 Confirmed rare / unexpected:
 {rare_text}
-
-Confirmed special groups:
-{group_highlight}
 
 Speculated (mention cautiously):
 {speculated_text}
@@ -795,7 +836,7 @@ Structured summary:"""
         Returns:
             (machine_narrative, human_narrative, notable_species_images, species_table)
         """
-        log.info(f"[{summary_id}] Generating narratives...")
+        log.info("generating_narratives", summary_id=str(summary_id))
 
         # ----- Context from enrichment (confirmed preferred, then speculated) -----
         species_contexts: dict[str, dict] = {}
