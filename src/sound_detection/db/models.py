@@ -1,11 +1,11 @@
 """SQLModel definitions for the expanded domain model."""
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import UUID as SA_UUID
-from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 
@@ -160,3 +160,34 @@ class BiomeSummary(SQLModel, table=True):
     grok_narrative: str | None = Field(default=None, nullable=True)
 
     error_message: str | None = None
+
+
+class SpeciesSiteProximity(SQLModel, table=True):
+    """Nearest iNaturalist observation of a species relative to a site.
+
+    Site-relative by design: the same species has a different distance at
+    each site. This is a passive attribute for now; confirmation logic comes later.
+    """
+
+    __tablename__ = "species_site_proximity"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    site_id: uuid.UUID = Field(foreign_key="site.id", index=True)
+    scientific_name: str = Field(index=True, max_length=200)
+
+    distance_km: float | None = None
+    distance_miles: float | None = None
+
+    # iNat observation details (None if nothing found within the search radius)
+    observation_id: int | None = None
+    observed_on: date | None = None
+    observation_lat: float | None = None
+    observation_lon: float | None = None
+    quality_grade: str | None = None
+    place_guess: str | None = None
+
+    # How far we searched, and when
+    search_radius_km: float = Field(default=160.0)
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    __table_args__ = (UniqueConstraint("site_id", "scientific_name", name="uq_site_species_proximity"),)
