@@ -165,8 +165,9 @@ class BiomeSummary(SQLModel, table=True):
 class SpeciesSiteProximity(SQLModel, table=True):
     """Nearest iNaturalist observation of a species relative to a site.
 
-    Site-relative by design: the same species has a different distance at
-    each site. This is a passive attribute for now; confirmation logic comes later.
+    Site-relative by design. Used as the third confirmation signal in biome
+    summaries: a species is confirmed with any 2 of BirdNET, Perch, and
+    proximity within the criteria radius.
     """
 
     __tablename__ = "species_site_proximity"

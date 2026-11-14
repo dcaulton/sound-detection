@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from sound_detection.core.concurrency import analysis_semaphore
-from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording
+from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording, SpeciesSiteProximity
 from sound_detection.knowledge.biome_export import backfill_images as export_backfill_images
 from sound_detection.knowledge.biome_export import export_to_docx as export_to_docx_fn
 from sound_detection.knowledge.biome_narratives import (
@@ -20,7 +20,7 @@ from sound_detection.knowledge.biome_narratives import (
     enrich_species,
     generate_narratives,
 )
-from sound_detection.knowledge.filtering import filter_species
+from sound_detection.knowledge.filtering import confirmation_signal_count, filter_species, is_confirmed_species
 from sound_detection.knowledge.grading_criteria import DEFAULT_CRITERIA
 from sound_detection.knowledge.rag.retriever import Retriever
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
@@ -250,56 +250,78 @@ class BiomeSummaryService:
     ) -> tuple[dict[str, int], dict[str, int], list[dict], list[dict]]:
         """
         Returns:
-            confirmed_counts:   scientific_name -> distinct confirmed_group_id count
-            speculated_counts:  scientific_name -> single-model detection count
+            confirmed_counts:   scientific_name -> detection count for species with >= 2 of 3 signals
+            speculated_counts:  scientific_name -> detection count for species with exactly 1 signal
             confirmed_species:  filtered list for enrichment (confirmation=confirmed)
             speculated_species: filtered list for enrichment (confirmation=speculated)
+
+        A species is confirmed when at least two of these are true:
+        BirdNET saw it, Perch saw it, or the nearest iNat observation is within
+        criteria.proximity.radius_miles of the site.
         """
         log.info("querying_detections", summary_id=str(summary.id), window_days=summary.window_days)
         cutoff = datetime.now(UTC) - timedelta(days=summary.window_days)
 
-        # --- Confirmed: agreement events (distinct group ids per species) ---
-        confirmed_stmt = (
+        # Per-species, per-model counts so we can score the three signals independently
+        model_stmt = (
             select(  # type: ignore[call-overload]
                 Detection.scientific_name,
-                func.count(func.distinct(Detection.confirmed_group_id)).label("count"),  # type: ignore[arg-type]
-            )  # type: ignore[arg-type]
-            .join(Recording, Detection.recording_id == Recording.id)
-            .join(Microphone, Recording.microphone_id == Microphone.id)
-            .where(Microphone.site_id == summary.site_id)
-            .where(Detection.created_at >= cutoff)
-            .where(col(Detection.confirmed_group_id).is_not(None))
-            .group_by(Detection.scientific_name)
-            .order_by(func.count(func.distinct(Detection.confirmed_group_id)).desc())  # type: ignore[arg-type]
-        )
-
-        # --- Speculated: single-model rows only ---
-        speculated_stmt = (
-            select(  # type: ignore[call-overload]
-                Detection.scientific_name,
+                Detection.model,
                 func.count().label("count"),  # type: ignore[arg-type]
-            )  # type: ignore[arg-type]
-            .join(Recording, Detection.recording_id == Recording.id)
-            .join(Microphone, Recording.microphone_id == Microphone.id)
-            .where(Microphone.site_id == summary.site_id)
-            .where(Detection.created_at >= cutoff)
-            .where(col(Detection.confirmed_group_id).is_(None))
-            .group_by(Detection.scientific_name)
-            .order_by(func.count().desc())  # type: ignore[arg-type]
+            )
+            .join(Recording, col(Detection.recording_id) == col(Recording.id))
+            .join(Microphone, col(Recording.microphone_id) == col(Microphone.id))
+            .where(col(Microphone.site_id) == summary.site_id)
+            .where(col(Detection.created_at) >= cutoff)
+            .group_by(Detection.scientific_name, Detection.model)
         )
+        model_rows = (await self.session.execute(model_stmt)).all()
 
-        confirmed_rows = (await self.session.execute(confirmed_stmt)).all()
-        speculated_rows = (await self.session.execute(speculated_stmt)).all()
+        birdnet_counts: dict[str, int] = {}
+        perch_counts: dict[str, int] = {}
+        for row in model_rows:
+            name = row.scientific_name
+            if not name:
+                continue
+            func.count().label("n")
+            n = int(row.n)  # type: ignore[arg-type]
+            if row.model == "perch":
+                perch_counts[name] = n
+            else:
+                # birdnet and any future acoustic model count as the acoustic signal
+                birdnet_counts[name] = birdnet_counts.get(name, 0) + n
+
+        # Proximity signal: nearest iNat observation for this site
+        prox_rows = (
+            (
+                await self.session.execute(
+                    select(SpeciesSiteProximity).where(col(SpeciesSiteProximity.site_id) == summary.site_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        proximity_miles: dict[str, float] = {
+            r.scientific_name: r.distance_miles for r in prox_rows if r.distance_miles is not None
+        }
+
+        radius_miles = float((criteria.get("proximity") or {}).get("radius_miles", 100))
+        min_signals = int((criteria.get("confirmation") or {}).get("min_signals", 2))
 
         confirmed_counts: dict[str, int] = {}
-        for row in confirmed_rows:
-            if row.scientific_name:
-                confirmed_counts[row.scientific_name] = int(row.count)  # type: ignore[call-overload]
-
         speculated_counts: dict[str, int] = {}
-        for row in speculated_rows:
-            if row.scientific_name:
-                speculated_counts[row.scientific_name] = int(row.count)  # type: ignore[call-overload]
+        for name in set(birdnet_counts) | set(perch_counts):
+            signals = confirmation_signal_count(
+                has_birdnet=name in birdnet_counts,
+                has_perch=name in perch_counts,
+                distance_miles=proximity_miles.get(name),
+                radius_miles=radius_miles,
+            )
+            total = birdnet_counts.get(name, 0) + perch_counts.get(name, 0)
+            if is_confirmed_species(signals, min_signals):
+                confirmed_counts[name] = total
+            else:
+                speculated_counts[name] = total
 
         if not confirmed_counts and not speculated_counts:
             log.info("no_detections", summary_id=str(summary.id))

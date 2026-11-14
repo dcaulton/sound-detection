@@ -72,6 +72,28 @@ def passes_filters(
     return in_scope(chain, criteria)
 
 
+def confirmation_signal_count(
+    has_birdnet: bool,
+    has_perch: bool,
+    distance_miles: float | None,
+    radius_miles: float,
+) -> int:
+    """How many of the three confirmation signals are present.
+
+    Signals: BirdNET detection, Perch detection, iNat proximity within radius.
+    A species is confirmed when this is >= criteria.confirmation.min_signals (default 2).
+    """
+    signals = int(has_birdnet) + int(has_perch)
+    if distance_miles is not None and distance_miles <= radius_miles:
+        signals += 1
+    return signals
+
+
+def is_confirmed_species(signal_count: int, min_signals: int = 2) -> bool:
+    """True when the species has enough independent signals to be confirmed."""
+    return signal_count >= min_signals
+
+
 def filter_species(
     confirmed_counts: dict[str, int],
     speculated_counts: dict[str, int],
