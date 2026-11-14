@@ -64,6 +64,13 @@ async def run(site_id: UUID | None, limit: int | None, radius_km: float) -> None
             sites = (await session.execute(select(Site))).scalars().all()
 
         for site in sites:
+            if site.latitude == 0 and site.longitude == 0:
+                log.warning("skipping %s (%s): coordinates are 0,0", site.id, site.name)
+                continue
+            if not (-90 <= site.latitude <= 90 and -180 <= site.longitude <= 180):
+                log.warning("skipping %s (%s): coordinates out of range", site.id, site.name)
+                continue
+
             names = await species_for_site(session, site.id)
             if limit:
                 names = names[:limit]
