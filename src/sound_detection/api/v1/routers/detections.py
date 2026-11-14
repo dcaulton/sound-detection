@@ -16,10 +16,11 @@ from sqlalchemy.orm import selectinload
 from sqlmodel import func, select
 
 from sound_detection.core.concurrency import analysis_semaphore
-from sound_detection.db.models import Detection, Microphone, Recording
+from sound_detection.db.models import Detection, Microphone, Recording, Site
 from sound_detection.db.neo4j import get_neo4j_driver
 from sound_detection.db.repositories import RecordingRepository
 from sound_detection.db.session import AsyncSessionLocal, get_db
+from sound_detection.knowledge.proximity import upsert_proximity
 from sound_detection.knowledge.seed_or_update import SeedOrUpdate
 from sound_detection.ml.inference import analyze_with_birdnet
 from sound_detection.ml.perch_inference import analyze_with_perch
@@ -81,6 +82,8 @@ async def background_analyze(
             if session is None:
                 session = AsyncSessionLocal()
                 close_session = True
+            site: Site | None = None
+            unique_species: set[str] = set()
             try:
                 repo = RecordingRepository(session)
                 await repo.save_detections(recording_id=recording_id, detections=all_dets)
@@ -89,19 +92,37 @@ async def background_analyze(
                     recording.status = "completed"
                     recording.duration_seconds = duration
                     session.add(recording)
+
+                # Resolve site on the same session the analysis is using
+                if recording and recording.microphone_id:
+                    mic = await session.get(Microphone, recording.microphone_id)
+                    if mic:
+                        site = await session.get(Site, mic.site_id)
+
+                unique_species = {d.scientific_name for d in all_dets if getattr(d, "scientific_name", None)}
+
                 if close_session:
                     await session.commit()
             finally:
                 if close_session and session is not None:
                     await session.close()
 
-            # knowledge seed (same as today)
-            unique_species = {d.scientific_name for d in all_dets if getattr(d, "scientific_name", None)}
+            # knowledge seed + passive proximity for this site
             for species in unique_species:
                 try:
                     SeedOrUpdate(get_neo4j_driver()).seed_or_update(species)
                 except Exception:
                     log.exception("Failed to seed knowledge", species=species)
+                if site is not None:
+                    try:
+                        # Reuse the caller's session (tests); otherwise open an app session
+                        if not close_session and session is not None:
+                            await upsert_proximity(session, site.id, species, site.latitude, site.longitude)
+                        else:
+                            async with AsyncSessionLocal() as prox_session:
+                                await upsert_proximity(prox_session, site.id, species, site.latitude, site.longitude)
+                    except Exception:
+                        log.exception("Failed to update proximity", species=species, site_id=str(site.id))
 
             log.info("Background analysis complete", recording_id=recording_id, detections=len(all_dets))
 
