@@ -279,16 +279,13 @@ class BiomeSummaryService:
 
         birdnet_counts: dict[str, int] = {}
         perch_counts: dict[str, int] = {}
-        for row in model_rows:
-            name = row.scientific_name
+        for name, model, count in model_rows:
             if not name:
                 continue
-            func.count().label("n")
-            n = int(row.n)  # type: ignore[arg-type]
-            if row.model == "perch":
+            n = int(count)
+            if model == "perch":
                 perch_counts[name] = n
             else:
-                # birdnet and any future acoustic model count as the acoustic signal
                 birdnet_counts[name] = birdnet_counts.get(name, 0) + n
 
         # Proximity signal: nearest iNat observation for this site
