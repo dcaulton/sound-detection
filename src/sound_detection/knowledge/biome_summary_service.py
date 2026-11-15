@@ -384,9 +384,7 @@ class BiomeSummaryService:
         for sp in confirmed_species + speculated_species:
             name = sp["scientific_name"]
             sp["unexpected"] = name in unexpected
-            ctx = species_contexts.get(name) or {}
-            illinois = ctx.get("recorded_in_illinois")
-            sp["expected_here"] = name in prior_counts and illinois is True
+            sp["expected_here"] = name in prior_counts
             if sp["expected_here"]:
                 sp["prior_count"] = prior_counts[name]
 
