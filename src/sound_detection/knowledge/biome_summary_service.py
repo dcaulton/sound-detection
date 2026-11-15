@@ -20,7 +20,12 @@ from sound_detection.knowledge.biome_narratives import (
     enrich_species,
     generate_narratives,
 )
-from sound_detection.knowledge.filtering import confirmation_signal_count, filter_species, is_confirmed_species
+from sound_detection.knowledge.filtering import (
+    confirmation_signal_count,
+    filter_species,
+    is_confirmed_species,
+    is_unexpected,
+)
 from sound_detection.knowledge.grading_criteria import DEFAULT_CRITERIA
 from sound_detection.knowledge.rag.retriever import Retriever
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
@@ -303,22 +308,46 @@ class BiomeSummaryService:
         }
 
         radius_miles = float((criteria.get("proximity") or {}).get("radius_miles", 100))
+        far_miles = float((criteria.get("proximity") or {}).get("far_miles", 500))
         min_signals = int((criteria.get("confirmation") or {}).get("min_signals", 2))
+        prior_days = int((criteria.get("expected") or {}).get("prior_days", 60))
+        prior_min_count = int((criteria.get("expected") or {}).get("min_count", 50))
 
         confirmed_counts: dict[str, int] = {}
         speculated_counts: dict[str, int] = {}
+        unexpected: set[str] = set()
         for name in set(birdnet_counts) | set(perch_counts):
+            dist = proximity_miles.get(name)
             signals = confirmation_signal_count(
                 has_birdnet=name in birdnet_counts,
                 has_perch=name in perch_counts,
-                distance_miles=proximity_miles.get(name),
+                distance_miles=dist,
                 radius_miles=radius_miles,
+                far_miles=far_miles,
             )
             total = birdnet_counts.get(name, 0) + perch_counts.get(name, 0)
             if is_confirmed_species(signals, min_signals):
                 confirmed_counts[name] = total
             else:
                 speculated_counts[name] = total
+            if is_unexpected(name in birdnet_counts, name in perch_counts, dist, radius_miles, far_miles):
+                unexpected.add(name)
+
+        # Familiar residents: many detections in the window before this one,
+        # and known from eBird/BirdNET as recorded in Illinois.
+        prior_end = cutoff
+        prior_start = cutoff - timedelta(days=prior_days)
+        prior_stmt = (
+            select(Detection.scientific_name, func.count().label("n"))  # type: ignore[call-overload]
+            .join(Recording, col(Detection.recording_id) == col(Recording.id))
+            .join(Microphone, col(Recording.microphone_id) == col(Microphone.id))
+            .where(col(Microphone.site_id) == summary.site_id)
+            .where(col(Detection.created_at) >= prior_start)
+            .where(col(Detection.created_at) < prior_end)
+            .group_by(Detection.scientific_name)
+        )
+        prior_rows = (await self.session.execute(prior_stmt)).all()
+        prior_counts = {name: int(n) for name, n in prior_rows if name and int(n) >= prior_min_count}
 
         if not confirmed_counts and not speculated_counts:
             log.info("no_detections", summary_id=str(summary.id))
@@ -349,6 +378,17 @@ class BiomeSummaryService:
             criteria,
             neo4j_driver=self.neo4j_driver,
         )
+
+        # Tag unexpected (far iNat + both models) and familiar residents
+        # (many detections in the prior window, and eBird says Illinois).
+        for sp in confirmed_species + speculated_species:
+            name = sp["scientific_name"]
+            sp["unexpected"] = name in unexpected
+            ctx = species_contexts.get(name) or {}
+            illinois = ctx.get("recorded_in_illinois")
+            sp["expected_here"] = name in prior_counts and illinois is True
+            if sp["expected_here"]:
+                sp["prior_count"] = prior_counts[name]
 
         log.info(
             "filtering_complete",

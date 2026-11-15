@@ -6,7 +6,7 @@ A production-leaning, local-first bioacoustics platform for continuous wildlife 
 
 Sound Detection ingests audio from edge recorders (primarily AudioMoth), runs them through a multi-stage ML pipeline, and turns raw detections into meaningful ecological insights.
 
-Recent work added a **criteria-driven BiomeSummaryService**. Species are filtered and scored against a user-supplied taxonomy criteria (any rank, any clade, or none) instead of a fixed list of bird families. Confirmed detections (BirdNET + Perch agreement) drive the primary narrative; single-analyzer detections are treated as speculated.
+Recent work added a **criteria-driven BiomeSummaryService**. Species are filtered and scored against a user-supplied taxonomy criteria (any rank, any clade, or none). A species is **confirmed** on 2 of 3 signals: BirdNET, Perch, and a nearby iNaturalist observation. iNat distance is banded: within 100 miles verifies, 100–500 miles is ignored, and 500+ miles with both acoustic models flags the species as unexpected. Familiar Illinois residents, learned from the prior 60 days, are noted briefly and kept out of the highlight sections unless their interest weight is raised.
 
 ## Key Features
 
@@ -19,6 +19,9 @@ Recent work added a **criteria-driven BiomeSummaryService**. Species are filtere
 - **Local-first architecture** — Designed to run on-prem or at the edge with minimal cloud dependency.
 - **FastAPI + async SQLAlchemy** — Modern, type-safe backend.
 - **Kubernetes-ready** — Runs on MicroK8s with Traefik, Postgres, Neo4j, and MLflow.
+- **2-of-3 confirmation** — BirdNET, Perch, and iNaturalist proximity. Near (≤100 mi) verifies a single model; far (≥500 mi) plus both models marks a species unexpected.
+- **Familiar residents** — Species seen often in the 60 days before the window and known from eBird in Illinois. Brief "always here" section; elevate any of them with an interest weight.
+- **Insight-driven narratives** — Per-species enrichment is passed into section-specific narrative calls (soundscape, species of interest, rare, ecological relationships) instead of a count summary.
 
 ## Tech Stack
 

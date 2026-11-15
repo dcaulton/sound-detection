@@ -72,21 +72,58 @@ def passes_filters(
     return in_scope(chain, criteria)
 
 
+def proximity_band(
+    distance_miles: float | None,
+    near_miles: float = 100.0,
+    far_miles: float = 500.0,
+) -> str:
+    """Classify a nearest-iNat distance.
+
+    near  (<= near_miles): verifying signal. A single model plus this is confirmed.
+    mid   (near < d < far): undefined. Proximity is ignored.
+    far   (>= far_miles): out of known range. Not a confirming signal, but if both
+          acoustic models also fired the species is flagged unexpected.
+    unknown: no proximity row.
+    """
+    if distance_miles is None:
+        return "unknown"
+    if distance_miles <= near_miles:
+        return "near"
+    if distance_miles >= far_miles:
+        return "far"
+    return "mid"
+
+
 def confirmation_signal_count(
     has_birdnet: bool,
     has_perch: bool,
     distance_miles: float | None,
     radius_miles: float,
+    far_miles: float = 500.0,
 ) -> int:
-    """How many of the three confirmation signals are present.
+    """How many confirming signals are present.
 
-    Signals: BirdNET detection, Perch detection, iNat proximity within radius.
-    A species is confirmed when this is >= criteria.confirmation.min_signals (default 2).
+    Signals: BirdNET, Perch, and iNat within radius_miles (the near band).
+    A far observation does not confirm. The mid band is ignored.
     """
     signals = int(has_birdnet) + int(has_perch)
-    if distance_miles is not None and distance_miles <= radius_miles:
+    if proximity_band(distance_miles, radius_miles, far_miles) == "near":
         signals += 1
     return signals
+
+
+def is_unexpected(
+    has_birdnet: bool,
+    has_perch: bool,
+    distance_miles: float | None,
+    near_miles: float = 100.0,
+    far_miles: float = 500.0,
+) -> bool:
+    """True when both models agree and the nearest iNat is far away.
+
+    This is the Anna's Hummingbird case: dual detection, range says elsewhere.
+    """
+    return has_birdnet and has_perch and proximity_band(distance_miles, near_miles, far_miles) == "far"
 
 
 def is_confirmed_species(signal_count: int, min_signals: int = 2) -> bool:

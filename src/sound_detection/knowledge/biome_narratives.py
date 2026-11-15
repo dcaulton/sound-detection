@@ -103,9 +103,12 @@ def build_human_narrative_chain() -> Runnable:
     **Structure to follow:**
     1. Overall soundscape - what was actually common and dominant
     2. High-interest and indicator species
-    3. Rare or unexpected species
-    4. Brief ecological observations and closing
-    5. Unconfirmed / single-analyzer detections (brief, cautious)
+    3. Rare or unexpected species (far from known iNat range, or otherwise notable)
+    4. Familiar residents - species seen often in the prior window and known from 
+      Illinois. One short paragraph: they were here, they are always here. 
+      Do not dwell.
+    5. Brief ecological observations and closing
+    6. Unconfirmed / single-analyzer detections (brief, cautious)
 
     **Important:**
     - Balance common/dominant species with rare and high-interest ones.
@@ -128,6 +131,9 @@ def build_human_narrative_chain() -> Runnable:
 
     Confirmed rare / unexpected:
     {rare_text}
+
+    Familiar residents (always here; mention briefly):
+    {expected_text}
 
     Speculated (mention cautiously, if at all):
     {speculated_text}
@@ -257,9 +263,30 @@ async def generate_narratives(
     buckets = bucket_taxa(confirmed_counts, species_contexts)
     speculated_buckets = bucket_taxa(speculated_counts, species_contexts)
 
-    high_interest_text = format_species_list(buckets["high_interest"])
+    # Unexpected: both models, nearest iNat >= far band. Always mention these.
+    unexpected_names = {
+        sp["scientific_name"] for sp in enriched_confirmed_species + enriched_speculated_species if sp.get("unexpected")
+    }
+    # Familiar: seen often in the prior window and known Illinois residents.
+    # Elevated only if the request gave them an interest weight above 1.
+    expected_names = {
+        sp["scientific_name"]
+        for sp in enriched_confirmed_species + enriched_speculated_species
+        if sp.get("expected_here") and float((sp.get("context") or {}).get("interest_weight") or 1.0) <= 1.0
+    }
+
+    all_scored = {s["scientific_name"]: s for s in buckets["table_rows"]}
+    unexpected_rows = [all_scored[n] for n in unexpected_names if n in all_scored]
+    expected_rows = [all_scored[n] for n in expected_names if n in all_scored]
+    expected_rows.sort(key=lambda s: s["count"], reverse=True)
+
+    high_interest_rows = [s for s in buckets["high_interest"] if s["scientific_name"] not in expected_names]
+    rare_rows = unexpected_rows or [s for s in buckets["rare_vagrant"] if s["scientific_name"] not in expected_names]
+
+    high_interest_text = format_species_list(high_interest_rows)
     dominant_text = format_species_list(buckets["dominant"])
-    rare_text = format_species_list(buckets["rare_vagrant"])
+    rare_text = format_species_list(rare_rows)
+    expected_text = format_species_list(expected_rows, limit=12)
     speculated_text = format_species_list(
         speculated_buckets["high_interest"] or speculated_buckets["dominant"],
         limit=6,
@@ -272,6 +299,7 @@ async def generate_narratives(
         "high_interest_text": high_interest_text,
         "dominant_text": dominant_text,
         "rare_text": rare_text,
+        "expected_text": expected_text,
         "speculated_text": speculated_text,
     }
 

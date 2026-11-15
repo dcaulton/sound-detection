@@ -34,7 +34,12 @@ DEFAULT_CRITERIA: dict[str, Any] = {
     "proximity": {
         "source": "inaturalist",
         "radius_miles": 100,
+        "far_miles": 500,
         "quality_grade": "research",
+    },
+    "expected": {
+        "prior_days": 60,
+        "min_count": 50,
     },
     "confirmation": {
         "min_signals": 2,
