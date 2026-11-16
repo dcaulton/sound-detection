@@ -38,9 +38,6 @@ def score_taxon(
     weight = float(context.get("interest_weight") or 1.0)
     score *= weight
 
-    if context.get("recorded_in_illinois") is False:
-        score += 6.0
-
     residency = (context.get("residency_status") or "").lower()
     if any(k in residency for k in ("vagrant", "rare", "accidental")):
         score += 5.0
@@ -88,10 +85,6 @@ def bucket_taxa(
     return {
         "table_rows": by_count,
         "high_interest": [s for s in by_score if s["score"] >= 12][:12],
-        "rare_vagrant": [
-            s
-            for s in by_score
-            if s["count"] <= 4 and (s["context"].get("recorded_in_illinois") is False or s["score"] >= 10)
-        ][:10],
+        "rare_vagrant": [s for s in by_score if s["count"] <= 4 and s["score"] >= 10][:10],
         "dominant": by_count[:8],
     }

@@ -37,6 +37,10 @@ def km_to_miles(km: float) -> float:
     return km / KM_PER_MILE
 
 
+def miles_to_km(miles: float) -> float:
+    return miles * KM_PER_MILE
+
+
 class InaturalistHarvester:
     """Find the nearest iNaturalist observation of a species to a point."""
 

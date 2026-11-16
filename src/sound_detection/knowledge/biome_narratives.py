@@ -33,7 +33,6 @@ def build_species_enrichment_chain() -> Runnable:
     Detection count in the last {window_days} days: {count}
 
     Structured knowledge:
-    - Recorded in Illinois: {recorded_in_illinois}
     - Primary habitat: {primary_habitat}
     - Diet: {diet_description}
     - Interesting facts: {interesting_facts}
@@ -153,6 +152,115 @@ def format_species_list(rows: list[ScoredTaxon], limit: int = 8) -> str:
     return "\n".join(parts) if parts else "None"
 
 
+def format_species_with_insights(
+    rows: list[ScoredTaxon],
+    insights: dict[str, str],
+    limit: int = 8,
+) -> str:
+    """Bullet list that includes the per-species enrichment paragraph."""
+    parts = []
+    for r in rows[:limit]:
+        common = r["common_name"] or ""
+        name = r["scientific_name"]
+        label = f"{common} (*{name}*)" if common else f"*{name}*"
+        parts.append(f"- {label}: {r['count']} events (score {r['score']})")
+        insight = insights.get(name)
+        if insight:
+            parts.append(f"  Insight: {insight}")
+    return "\n".join(parts) if parts else "None"
+
+
+def format_count_table(rows: list[ScoredTaxon]) -> str:
+    """Markdown table of name and event count. Score is internal and omitted."""
+    if not rows:
+        return "_None_"
+    lines = [
+        "| Common name | Scientific name | Events |",
+        "|---|---|---|",
+    ]
+    for r in rows:
+        common = r["common_name"] or "—"
+        lines.append(f"| {common} | {r['scientific_name']} | {r['count']} |")
+    return "\n".join(lines)
+
+
+def criteria_note(text: str) -> str:
+    """Italic criteria line placed under a section header."""
+    return f"*{text}*"
+
+
+def build_interest_chain() -> Runnable:
+    prompt = ChatPromptTemplate.from_template(
+        """You are an experienced field naturalist writing for a homeowner or land steward.
+
+Write the body of the **High-interest and indicator species** section. No heading.
+
+Aim for 500-700 words. Give each species room. Draw on the Insight under each
+name: range, season, habitat, behavior, what its presence says about the site.
+Use both common and scientific names. Do not invent facts that are not in the
+insights. Do not repeat the selection criteria; they are added separately.
+
+Species:
+{interest_text}
+
+Section body:"""
+    )
+    return prompt | llm | StrOutputParser()
+
+
+def build_rare_chain() -> Runnable:
+    prompt = ChatPromptTemplate.from_template(
+        """You are an experienced field naturalist writing for a homeowner or land steward.
+
+Write the body of the **Rare or unexpected** section. No heading.
+
+Aim for 400-600 words. These species were heard by both models and iNaturalist
+does not place them nearby. Explain why each is notable, using the insights.
+If the list is empty, say so in one sentence.
+
+Species:
+{rare_text}
+
+Section body:"""
+    )
+    return prompt | llm | StrOutputParser()
+
+
+def build_soundscape_chain() -> Runnable:
+    prompt = ChatPromptTemplate.from_template(
+        """You are an experienced field naturalist writing for a homeowner or land steward.
+
+Write the body of the **Overall soundscape** section. No heading. 350-500 words.
+
+What was common and dominant, the character of the soundscape, and the seasonal
+context. Use the insights. Do not restate counts as the whole point.
+
+Dominant species:
+{dominant_text}
+
+Section body:"""
+    )
+    return prompt | llm | StrOutputParser()
+
+
+def build_familiar_chain() -> Runnable:
+    prompt = ChatPromptTemplate.from_template(
+        """You are an experienced field naturalist writing for a homeowner or land steward.
+
+Write a short body for the **Familiar residents** section. No heading. 150-250 words.
+
+These species had many detections in the prior window and a nearby iNaturalist
+record. Mention a few by name and say they are the regulars. A complete table
+is appended separately; do not try to list every species.
+
+Residents:
+{expected_text}
+
+Section body:"""
+    )
+    return prompt | llm | StrOutputParser()
+
+
 async def enrich_species(
     summary_id: Any,
     filtered_species: list[dict[str, Any]],
@@ -193,7 +301,6 @@ async def enrich_species(
                     "common_name": context.get("common_name", name),
                     "window_days": window_days,
                     "count": count,
-                    "recorded_in_illinois": context.get("recorded_in_illinois", False),
                     "primary_habitat": context.get("primary_habitat", "Unknown"),
                     "diet_description": context.get("diet_description", "Unknown"),
                     "interesting_facts": context.get("interesting_facts", "None available"),
@@ -263,12 +370,14 @@ async def generate_narratives(
     buckets = bucket_taxa(confirmed_counts, species_contexts)
     speculated_buckets = bucket_taxa(speculated_counts, species_contexts)
 
-    # Unexpected: both models, nearest iNat >= far band. Always mention these.
+    insights: dict[str, str] = {}
+    for sp in enriched_confirmed_species + enriched_speculated_species:
+        if sp.get("llm_insight"):
+            insights[sp["scientific_name"]] = sp["llm_insight"]
+
     unexpected_names = {
         sp["scientific_name"] for sp in enriched_confirmed_species + enriched_speculated_species if sp.get("unexpected")
     }
-    # Familiar: seen often in the prior window and known Illinois residents.
-    # Elevated only if the request gave them an interest weight above 1.
     expected_names = {
         sp["scientific_name"]
         for sp in enriched_confirmed_species + enriched_speculated_species
@@ -281,22 +390,39 @@ async def generate_narratives(
     expected_rows.sort(key=lambda s: s["count"], reverse=True)
 
     high_interest_rows = [s for s in buckets["high_interest"] if s["scientific_name"] not in expected_names]
+    # Full set for the table: every non-familiar species at the score cap, by count.
+    # The [:12] bucket is only what the prose sees; the table is the whole cut.
+    interest_table_rows = [
+        s for s in buckets["table_rows"] if s["score"] >= 12 and s["scientific_name"] not in expected_names
+    ]
+    interest_table_rows.sort(key=lambda s: s["count"], reverse=True)
     rare_rows = unexpected_rows or [s for s in buckets["rare_vagrant"] if s["scientific_name"] not in expected_names]
 
-    high_interest_text = format_species_list(high_interest_rows)
-    dominant_text = format_species_list(buckets["dominant"])
-    rare_text = format_species_list(rare_rows)
+    high_interest_text = format_species_with_insights(high_interest_rows, insights, limit=10)
+    dominant_text = format_species_with_insights(buckets["dominant"], insights)
+    rare_text = format_species_with_insights(rare_rows, insights, limit=10)
     expected_text = format_species_list(expected_rows, limit=12)
+    expected_table = format_count_table(expected_rows)
+    interest_table = format_count_table(interest_table_rows)
+    rare_table = format_count_table(sorted(rare_rows, key=lambda s: s["count"], reverse=True))
     speculated_text = format_species_list(
         speculated_buckets["high_interest"] or speculated_buckets["dominant"],
         limit=6,
     )
+
+    prox = criteria.get("proximity") or {}
+    exp = criteria.get("expected") or {}
+    near_mi = prox.get("radius_miles", 100)
+    far_mi = prox.get("far_miles", 500)
+    prior_days = exp.get("prior_days", 60)
+    prior_min = exp.get("min_count", 50)
 
     prompt_vars = {
         "window_days": window_days,
         "total_confirmed_species": len(confirmed_counts),
         "total_speculated_species": len(speculated_counts),
         "high_interest_text": high_interest_text,
+        "interest_text": high_interest_text,
         "dominant_text": dominant_text,
         "rare_text": rare_text,
         "expected_text": expected_text,
@@ -306,8 +432,51 @@ async def generate_narratives(
     machine_chain = machine_chain or build_narrative_chain()
     machine_narrative = await machine_chain.ainvoke(prompt_vars)
 
-    human_chain = human_chain or build_human_narrative_chain()
-    human_narrative = await human_chain.ainvoke(prompt_vars)
+    if human_chain is not None:
+        human_narrative = await human_chain.ainvoke(prompt_vars)
+    else:
+        soundscape = await build_soundscape_chain().ainvoke(prompt_vars)
+        interest = await build_interest_chain().ainvoke(prompt_vars)
+        rare = await build_rare_chain().ainvoke(prompt_vars)
+        familiar = await build_familiar_chain().ainvoke(prompt_vars)
+        human_narrative = "\n\n".join(
+            [
+                "## Overall soundscape\n\n"
+                + criteria_note(
+                    f"Most frequently detected species in the last {window_days} days. Counts are BirdNET plus Perch."
+                )
+                + "\n\n"
+                + soundscape.strip(),
+                "## High-interest and indicator species\n\n"
+                + criteria_note(
+                    "Highest interest score, or a clade given an interest weight above 1.0 "
+                    "in the request. Familiar residents are excluded unless elevated."
+                )
+                + "\n\n"
+                + interest.strip()
+                + "\n\n"
+                + interest_table,
+                "## Rare or unexpected\n\n"
+                + criteria_note(
+                    f"Both BirdNET and Perch detected the species, and iNaturalist has no "
+                    f"observation within {near_mi} miles (or the nearest is {far_mi}+ miles). "
+                    "A missing iNat record is treated as not local."
+                )
+                + "\n\n"
+                + rare.strip()
+                + "\n\n"
+                + rare_table,
+                "## Familiar residents\n\n"
+                + criteria_note(
+                    f"At least {prior_min} detections in the {prior_days} days before this window "
+                    f"at this site, and a nearest iNaturalist observation within {near_mi} miles."
+                )
+                + "\n\n"
+                + familiar.strip()
+                + "\n\n"
+                + expected_table,
+            ]
+        )
 
     notable_species_images: list[dict[str, Any]] = []
     image_candidates: list[Any] = buckets["high_interest"] or buckets["dominant"]

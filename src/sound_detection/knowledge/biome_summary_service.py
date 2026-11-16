@@ -24,9 +24,11 @@ from sound_detection.knowledge.filtering import (
     confirmation_signal_count,
     filter_species,
     is_confirmed_species,
+    is_local,
     is_unexpected,
 )
 from sound_detection.knowledge.grading_criteria import DEFAULT_CRITERIA
+from sound_detection.knowledge.harvesters.inaturalist import miles_to_km
 from sound_detection.knowledge.rag.retriever import Retriever
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
 
@@ -303,12 +305,15 @@ class BiomeSummaryService:
             .scalars()
             .all()
         )
-        proximity_miles: dict[str, float] = {
-            r.scientific_name: r.distance_miles for r in prox_rows if r.distance_miles is not None
+        # Canonical unit is kilometers. distance_miles is a display conversion
+        # of the same haversine result; do not compare it to km thresholds.
+        proximity_km: dict[str, float] = {
+            r.scientific_name: r.distance_km for r in prox_rows if r.distance_km is not None
         }
+        searched: set[str] = {r.scientific_name for r in prox_rows}
 
-        radius_miles = float((criteria.get("proximity") or {}).get("radius_miles", 100))
-        far_miles = float((criteria.get("proximity") or {}).get("far_miles", 500))
+        near_km = miles_to_km(float((criteria.get("proximity") or {}).get("radius_miles", 100)))
+        far_km = miles_to_km(float((criteria.get("proximity") or {}).get("far_miles", 500)))
         min_signals = int((criteria.get("confirmation") or {}).get("min_signals", 2))
         prior_days = int((criteria.get("expected") or {}).get("prior_days", 60))
         prior_min_count = int((criteria.get("expected") or {}).get("min_count", 50))
@@ -317,24 +322,33 @@ class BiomeSummaryService:
         speculated_counts: dict[str, int] = {}
         unexpected: set[str] = set()
         for name in set(birdnet_counts) | set(perch_counts):
-            dist = proximity_miles.get(name)
+            # None means we searched and found nothing, or we have not searched.
+            # Only a searched-and-empty row counts as not-local.
+            dist_km = proximity_km.get(name)
+            not_local = name in searched and name not in proximity_km
             signals = confirmation_signal_count(
                 has_birdnet=name in birdnet_counts,
                 has_perch=name in perch_counts,
-                distance_miles=dist,
-                radius_miles=radius_miles,
-                far_miles=far_miles,
+                distance_km=dist_km,
+                near_km=near_km,
+                far_km=far_km,
             )
             total = birdnet_counts.get(name, 0) + perch_counts.get(name, 0)
             if is_confirmed_species(signals, min_signals):
                 confirmed_counts[name] = total
             else:
                 speculated_counts[name] = total
-            if is_unexpected(name in birdnet_counts, name in perch_counts, dist, radius_miles, far_miles):
+            if is_unexpected(
+                name in birdnet_counts,
+                name in perch_counts,
+                None if not_local else dist_km,
+                near_km,
+                far_km,
+            ):
                 unexpected.add(name)
 
-        # Familiar residents: many detections in the window before this one,
-        # and known from eBird/BirdNET as recorded in Illinois.
+        # Familiar candidates: many detections in the prior window at this site.
+        # Local-ness is applied below from iNat distance, not eBird.
         prior_end = cutoff
         prior_start = cutoff - timedelta(days=prior_days)
         prior_stmt = (
@@ -379,12 +393,14 @@ class BiomeSummaryService:
             neo4j_driver=self.neo4j_driver,
         )
 
-        # Tag unexpected (far iNat + both models) and familiar residents
-        # (many detections in the prior window, and eBird says Illinois).
+        # Familiar: many detections in the prior window at this site, AND a
+        # local iNat observation (within the near band). No eBird gate.
         for sp in confirmed_species + speculated_species:
             name = sp["scientific_name"]
             sp["unexpected"] = name in unexpected
-            sp["expected_here"] = name in prior_counts
+            sp["distance_km"] = proximity_km.get(name)
+            local = is_local(proximity_km.get(name), near_km) if name in proximity_km else False
+            sp["expected_here"] = name in prior_counts and local
             if sp["expected_here"]:
                 sp["prior_count"] = prior_counts[name]
 
@@ -433,7 +449,6 @@ class BiomeSummaryService:
             criteria,
             neo4j_driver=self.neo4j_driver,
             machine_chain=self._build_narrative_chain(),
-            human_chain=self._build_human_narrative_chain(),
         )
 
     async def build_grok_data_package(self, summary_id: UUID) -> str | None:

@@ -16,6 +16,8 @@ from testcontainers.postgres import PostgresContainer
 from sound_detection.db.session import get_db
 from sound_detection.main import app
 
+os.environ["TESTCONTAINERS_RYUK_DISABLED"] = "true"
+
 neo4j_container = Neo4jContainer("neo4j:5.20")
 neo4j_container.with_env("NEO4J_PLUGINS", '["apoc"]')
 

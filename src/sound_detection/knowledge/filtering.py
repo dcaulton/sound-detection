@@ -73,41 +73,45 @@ def passes_filters(
 
 
 def proximity_band(
-    distance_miles: float | None,
-    near_miles: float = 100.0,
-    far_miles: float = 500.0,
+    distance_km: float | None,
+    near_km: float,
+    far_km: float,
 ) -> str:
-    """Classify a nearest-iNat distance.
+    """Classify a nearest-iNat distance. Inputs are kilometers.
 
-    near  (<= near_miles): verifying signal. A single model plus this is confirmed.
-    mid   (near < d < far): undefined. Proximity is ignored.
-    far   (>= far_miles): out of known range. Not a confirming signal, but if both
-          acoustic models also fired the species is flagged unexpected.
-    unknown: no proximity row.
+    near     (<= near_km): local. Verifies a single acoustic model.
+    mid      (near < d < far): ignored.
+    far      (>= far_km): out of known range.
+    not_found (None): lookup ran and found nothing in the search radius.
+              Treated as not-local, same as far, for the unexpected flag.
     """
-    if distance_miles is None:
-        return "unknown"
-    if distance_miles <= near_miles:
+    if distance_km is None:
+        return "not_found"
+    if distance_km <= near_km:
         return "near"
-    if distance_miles >= far_miles:
+    if distance_km >= far_km:
         return "far"
     return "mid"
+
+
+def is_local(distance_km: float | None, near_km: float) -> bool:
+    """True when iNat has a research-grade observation within the near band."""
+    return proximity_band(distance_km, near_km, near_km * 5) == "near"
 
 
 def confirmation_signal_count(
     has_birdnet: bool,
     has_perch: bool,
-    distance_miles: float | None,
-    radius_miles: float,
-    far_miles: float = 500.0,
+    distance_km: float | None,
+    near_km: float,
+    far_km: float,
 ) -> int:
-    """How many confirming signals are present.
+    """Confirming signals: BirdNET, Perch, and a local iNat observation.
 
-    Signals: BirdNET, Perch, and iNat within radius_miles (the near band).
-    A far observation does not confirm. The mid band is ignored.
+    A far or missing observation does not confirm. The mid band is ignored.
     """
     signals = int(has_birdnet) + int(has_perch)
-    if proximity_band(distance_miles, radius_miles, far_miles) == "near":
+    if proximity_band(distance_km, near_km, far_km) == "near":
         signals += 1
     return signals
 
@@ -115,15 +119,20 @@ def confirmation_signal_count(
 def is_unexpected(
     has_birdnet: bool,
     has_perch: bool,
-    distance_miles: float | None,
-    near_miles: float = 100.0,
-    far_miles: float = 500.0,
+    distance_km: float | None,
+    near_km: float,
+    far_km: float,
 ) -> bool:
-    """True when both models agree and the nearest iNat is far away.
+    """Both models agree, and iNat does not place the species nearby.
 
-    This is the Anna's Hummingbird case: dual detection, range says elsewhere.
+    Far (>= far_km) or not_found (no observation in the search radius) both
+    count. This is how a European warbler with no local iNat record is flagged,
+    while Anna's at 30 miles is not.
     """
-    return has_birdnet and has_perch and proximity_band(distance_miles, near_miles, far_miles) == "far"
+    if not (has_birdnet and has_perch):
+        return False
+    band = proximity_band(distance_km, near_km, far_km)
+    return band in {"far", "not_found"}
 
 
 def is_confirmed_species(signal_count: int, min_signals: int = 2) -> bool:
