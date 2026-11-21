@@ -21,7 +21,20 @@ Recent work added a **criteria-driven BiomeSummaryService**. Species are filtere
 - **Kubernetes-ready** — Runs on MicroK8s with Traefik, Postgres, Neo4j, and MLflow.
 - **2-of-3 confirmation** — BirdNET, Perch, and iNaturalist proximity. Near (≤100 mi) verifies a single model; far (≥500 mi) plus both models marks a species unexpected.
 - **Familiar residents** — Species seen often in the 60 days before the window and known from eBird in Illinois. Brief "always here" section; elevate any of them with an interest weight.
-- **Insight-driven narratives** — Per-species enrichment is passed into section-specific narrative calls (soundscape, species of interest, rare, ecological relationships) instead of a count summary.
+- **Insight-driven narratives** — Per-species enrichment is passed into section-specific narrative calls (soundscape, species of interest, rare, ecological relationships) instead of a count summary. 
+
+## Birdsong plate
+
+[Birdsong](https://github.com/dopeytree/birdsong) draws detections as a plate of illustrations. It talks to BirdNET-Go, so this API serves the same shapes at `/api/v2`:
+
+- `GET /api/v2/analytics/species/summary` — the plate. No dates is all time; `start_date` and `end_date` is a window (7, 30, or any other).
+- `GET /api/v2/analytics/time/distribution/hourly` — hour-of-day bars.
+- `GET /api/v2/analytics/time/daily` — calls per day.
+- `GET /api/v2/detections` — latest hits, time and confidence. No audio yet.
+- `GET /api/v2/species` — family and order, empty for now.
+
+Optional `site_id` scopes every call to one site. Common names come from the detection row, ignoring the Perch placeholder `NEEDS COMMON NAME`, then from the Species node in Neo4j. There is no live iNat call. Art is Birdsong's own, looked up by scientific name.
+
 
 ## Tech Stack
 

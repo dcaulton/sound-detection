@@ -37,6 +37,17 @@ services:
       timeout: 5s
       retries: 5
 
+  birdsong:
+    image: ghcr.io/dopeytree/birdsong:latest
+    container_name: sound-detection-birdsong
+    restart: unless-stopped
+    ports:
+      - "8095:80"
+    environment:
+      BIRDNET_URL: http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"    
+
 volumes:
   sound_detection_postgres_data:
   neo4j_data:

@@ -8,9 +8,20 @@ from contextlib import asynccontextmanager
 import structlog
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from rich.console import Console
 
-from sound_detection.api.v1.routers import biome, debug, detections, knowledge, microphones, recordings, sites, species
+from sound_detection.api.v1.routers import (
+    biome,
+    birdnet_compat,
+    debug,
+    detections,
+    knowledge,
+    microphones,
+    recordings,
+    sites,
+    species,
+)
 from sound_detection.core.config import settings
 from sound_detection.utils.audio_io import configure_temp_root
 
@@ -36,6 +47,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Birdsong runs on its own origin and fetches these endpoints from the browser.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 app.include_router(biome.router)
 app.include_router(debug.router)
 app.include_router(detections.router)
@@ -44,6 +63,7 @@ app.include_router(microphones.router)
 app.include_router(recordings.router)
 app.include_router(sites.router)
 app.include_router(species.router)
+app.include_router(birdnet_compat.router)
 
 
 @app.get("/health")
