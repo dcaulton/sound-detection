@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col
 
 from sound_detection.core.concurrency import analysis_semaphore
-from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording, SpeciesSiteProximity
+from sound_detection.db.models import BiomeSummary, Detection, Microphone, Recording, Site, SpeciesSiteProximity
 from sound_detection.knowledge.biome_export import backfill_images as export_backfill_images
 from sound_detection.knowledge.biome_export import export_to_docx as export_to_docx_fn
 from sound_detection.knowledge.biome_narratives import (
@@ -59,17 +59,24 @@ class BiomeSummaryService:
         return build_narrative_chain()
 
     async def create_summary_job(
-        self, site_id: UUID, window_days: int = 30, criteria: dict[str, Any] | None = None, dry_run: bool = False
+        self,
+        site_id: UUID,
+        window_days: int = 30,
+        criteria: dict[str, Any] | None = None,
+        dry_run: bool = False,
+        start_date: str | None = None,
     ) -> UUID:
+        stored = dict(criteria or {})
+        if start_date:
+            stored["_start_date"] = start_date
         summary = BiomeSummary(
             site_id=site_id,
             window_days=window_days,
             status="pending",
-            criteria=criteria,
+            criteria=stored or None,
         )
-        # Stash dry_run flag in criteria so the background task can see it without a schema change
         if dry_run:
-            summary.criteria = {**(criteria or {}), "_dry_run": True}
+            summary.criteria = {**(summary.criteria or {}), "_dry_run": True}
         self.session.add(summary)
         await self.session.commit()
         await self.session.refresh(summary)
@@ -228,12 +235,15 @@ class BiomeSummaryService:
         if not summary:
             return None
 
+        site = await self.session.get(Site, summary.site_id)
         return {
             "id": str(summary.id),
             "site_id": str(summary.site_id),
+            "site_name": site.name if site else None,
             "created_at": summary.created_at.isoformat(),
             "status": summary.status,
             "window_days": summary.window_days,
+            "criteria": summary.criteria or {},
             "summary_json": summary.summary_json,
             "narrative": summary.narrative,  # existing (Weathervane)
             "human_narrative": summary.human_narrative,  # new pretty version
@@ -267,7 +277,14 @@ class BiomeSummaryService:
         criteria.proximity.radius_miles of the site.
         """
         log.info("querying_detections", summary_id=str(summary.id), window_days=summary.window_days)
-        cutoff = datetime.now(UTC) - timedelta(days=summary.window_days)
+        start_raw = criteria.get("_start_date")
+        if start_raw:
+            window_start = datetime.fromisoformat(str(start_raw)).replace(tzinfo=UTC)
+            window_end = window_start + timedelta(days=summary.window_days)
+        else:
+            window_end = datetime.now(UTC)
+            window_start = window_end - timedelta(days=summary.window_days)
+        cutoff = window_start
 
         # Per-species, per-model counts so we can score the three signals independently
         model_stmt = (
@@ -279,7 +296,8 @@ class BiomeSummaryService:
             .join(Recording, col(Detection.recording_id) == col(Recording.id))
             .join(Microphone, col(Recording.microphone_id) == col(Microphone.id))
             .where(col(Microphone.site_id) == summary.site_id)
-            .where(col(Detection.created_at) >= cutoff)
+            .where(col(Detection.created_at) >= window_start)
+            .where(col(Detection.created_at) < window_end)
             .group_by(Detection.scientific_name, Detection.model)
         )
         model_rows = (await self.session.execute(model_stmt)).all()
@@ -384,6 +402,20 @@ class BiomeSummaryService:
                 context = self.species_service.get_species_by_scientific_name(name)
                 if context:
                     species_contexts[name] = context
+
+        # Fill missing common names from iNat on the fly. Birds usually have one
+        # already; insects and mammals often do not.
+        missing = [n for n, ctx in species_contexts.items() if not ctx.get("common_name")]
+        missing += [n for n in set(confirmed_counts) | set(speculated_counts) if n not in species_contexts]
+        if missing:
+            from sound_detection.knowledge.harvesters.inaturalist import InaturalistHarvester
+
+            harvester = InaturalistHarvester()
+            for name in missing:
+                common = harvester.preferred_common_name(name)
+                if not common:
+                    continue
+                species_contexts.setdefault(name, {})["common_name"] = common
 
         confirmed_species, speculated_species = filter_species(
             confirmed_counts,

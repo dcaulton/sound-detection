@@ -7,6 +7,7 @@ and produce files or image URLs.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -51,6 +52,37 @@ def get_species_image(scientific_name: str) -> str | None:
     return None
 
 
+def add_markdown_table(doc: DocumentObject, lines: list[str]) -> None:
+    """Render a markdown table as a native Word table."""
+    rows = []
+    for line in lines:
+        if set(line.replace("|", "").replace("-", "").replace(":", "").strip()) == set():
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells:
+            rows.append(cells)
+    if not rows:
+        return
+    width = max(len(r) for r in rows)
+    table = doc.add_table(rows=1, cols=width)
+    table.style = "Table Grid"
+    for i, text in enumerate(rows[0]):
+        table.rows[0].cells[i].text = text
+        for paragraph in table.rows[0].cells[i].paragraphs:
+            for run in paragraph.runs:
+                run.bold = True
+    for row in rows[1:]:
+        cells = table.add_row().cells
+        for i in range(width):
+            cells[i].text = row[i] if i < len(row) else ""
+    doc.add_paragraph()
+
+
+def _is_table_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|")
+
+
 def add_taxon_table(doc: DocumentObject, table_rows: list[ScoredTaxon] | list[dict[str, Any]]) -> None:
     """Add a formatted Word table of scored taxa."""
     if not table_rows:
@@ -75,7 +107,7 @@ def add_taxon_table(doc: DocumentObject, table_rows: list[ScoredTaxon] | list[di
         cells[2].text = str(row.get("count", ""))
         cells[3].text = str(row.get("score", ""))
 
-    doc.add_paragraph()  # spacer
+    doc.add_paragraph()
 
 
 def export_to_docx(summary: dict[str, Any]) -> Path:
@@ -90,16 +122,34 @@ def export_to_docx(summary: dict[str, Any]) -> Path:
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # ---------- Metadata ----------
+    name_para = doc.add_paragraph()
+    name_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    name_run = name_para.add_run(summary.get("site_name") or "Unknown site")
+    name_run.bold = True
+    name_run.font.size = Pt(16)
+
+    id_para = doc.add_paragraph()
+    id_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    id_run = id_para.add_run(str(summary.get("site_id", "")))
+    id_run.italic = True
+    id_run.font.size = Pt(9)
+    id_run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+
     meta = doc.add_paragraph()
-    meta.add_run("Site ID: ").bold = True
-    meta.add_run(str(summary.get("site_id", "Unknown")))
-    meta.add_run("\n")
+    start = (summary.get("criteria") or {}).get("_start_date")
     meta.add_run("Window: ").bold = True
-    meta.add_run(f"Last {summary.get('window_days', '?')} days")
+    if start:
+        meta.add_run(f"{start} for {summary.get('window_days', '?')} days")
+    else:
+        meta.add_run(f"Last {summary.get('window_days', '?')} days")
     meta.add_run("\n")
     meta.add_run("Generated: ").bold = True
     created = summary.get("created_at", "")
     meta.add_run(created[:19].replace("T", " ") if created else "Unknown")
+    meta.add_run("\n")
+    meta.add_run("Parameters: ").bold = True
+    public_criteria = {k: v for k, v in (summary.get("criteria") or {}).items() if not str(k).startswith("_")}
+    meta.add_run(json.dumps(public_criteria, default=str) if public_criteria else "{}")
 
     doc.add_paragraph()  # spacer
 
@@ -116,8 +166,16 @@ def export_to_docx(summary: dict[str, Any]) -> Path:
             level = min(block.count("#"), 3)
             text = block.lstrip("# ").strip()
             doc.add_heading(text, level=level)
-        else:
-            doc.add_paragraph(block)
+            continue
+        lines = block.split("\n")
+        if (
+            lines
+            and all(_is_table_line(line) or not line.strip() for line in lines)
+            and any(_is_table_line(line) for line in lines)
+        ):
+            add_markdown_table(doc, [line for line in lines if _is_table_line(line)])
+            continue
+        doc.add_paragraph(block)
 
     # ----- Species Table -----
     doc.add_heading("Species Detected (more than one detection)", level=1)

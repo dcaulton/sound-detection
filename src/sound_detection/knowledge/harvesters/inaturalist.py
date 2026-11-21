@@ -137,6 +137,29 @@ class InaturalistHarvester:
             return int(results[0]["id"])
         return None
 
+    def preferred_common_name(self, scientific_name: str) -> str | None:
+        """English common name from iNat. Exact scientific-name match only."""
+        if " " not in scientific_name.strip():
+            return None
+        taxa_params: dict[str, str] = {
+            "q": scientific_name,
+            "is_active": "true",
+            "per_page": "5",
+            "rank": "species",
+            "locale": "en",
+        }
+        try:
+            resp = self.session.get(INAT_TAXA_URL, params=taxa_params, timeout=self.timeout)
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("iNat common name failed for %s: %s", scientific_name, exc)
+            return None
+        name_lower = scientific_name.lower()
+        for taxon in resp.json().get("results") or []:
+            if (taxon.get("name") or "").lower() == name_lower:
+                return taxon.get("preferred_common_name") or None
+        return None
+
     @staticmethod
     def _closest(results: list[dict[str, Any]], lat: float, lon: float) -> dict[str, Any] | None:
         best: dict[str, Any] | None = None

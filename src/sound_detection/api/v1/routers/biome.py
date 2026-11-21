@@ -31,6 +31,13 @@ dep_gbs = Depends(get_biome_service)
 class CreateSummaryRequest(BaseModel):
     site_id: UUID
     window_days: int = Field(default=30, ge=1, le=365)
+    start_date: str | None = Field(
+        default=None,
+        description=(
+            "ISO date (YYYY-MM-DD). Window is [start_date, start_date + window_days). "
+            "Omit for the last window_days ending now."
+        ),
+    )
     criteria: dict[str, Any] | None = None
     dry_run: bool = Field(default=False, description="Stop after Phase 1 filtering; skip enrichment and narratives")
 
@@ -47,6 +54,7 @@ async def create_summary(
         window_days=body.window_days,
         criteria=body.criteria,
         dry_run=body.dry_run,
+        start_date=body.start_date,
     )
     background_tasks.add_task(run_generate_summary, summary_id)
     return {

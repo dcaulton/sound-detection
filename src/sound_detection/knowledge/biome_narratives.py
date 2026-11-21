@@ -40,6 +40,8 @@ def build_species_enrichment_chain() -> Runnable:
     Relevant context from Wikipedia:
     {chunks_text}
 
+Write in English only. Do not use any other language.
+
     Task:
     Write a concise but insightful paragraph (3-6 sentences) that explains:
     - Why this species might be notable or unusual in this location right now
@@ -57,7 +59,8 @@ def build_narrative_chain() -> Runnable:
         """You are an expert ornithologist and ecologist producing a concise, structured summary of 
            acoustic detections for downstream automated systems (Weathervane and similar tools).
 
-Write a clear, information-dense report. Use short paragraphs and bullet points where helpful. Avoid fluff.
+Write a clear, information-dense report in English only. Use short paragraphs and bullet points 
+where helpful. Avoid fluff.
 
 **Required content:**
 - Overall activity level and the dominant (most frequently detected) species
@@ -193,7 +196,7 @@ def build_interest_chain() -> Runnable:
     prompt = ChatPromptTemplate.from_template(
         """You are an experienced field naturalist writing for a homeowner or land steward.
 
-Write the body of the **High-interest and indicator species** section. No heading.
+Write the body of the **High-interest and indicator species** section. No heading. English only.
 
 Aim for 500-700 words. Give each species room. Draw on the Insight under each
 name: range, season, habitat, behavior, what its presence says about the site.
@@ -212,7 +215,7 @@ def build_rare_chain() -> Runnable:
     prompt = ChatPromptTemplate.from_template(
         """You are an experienced field naturalist writing for a homeowner or land steward.
 
-Write the body of the **Rare or unexpected** section. No heading.
+Write the body of the **Rare or unexpected** section. No heading. English only.
 
 Aim for 400-600 words. These species were heard by both models and iNaturalist
 does not place them nearby. Explain why each is notable, using the insights.
@@ -230,7 +233,7 @@ def build_soundscape_chain() -> Runnable:
     prompt = ChatPromptTemplate.from_template(
         """You are an experienced field naturalist writing for a homeowner or land steward.
 
-Write the body of the **Overall soundscape** section. No heading. 350-500 words.
+Write the body of the **Overall soundscape** section. No heading. English only. 350-500 words.
 
 What was common and dominant, the character of the soundscape, and the seasonal
 context. Use the insights. Do not restate counts as the whole point.
@@ -247,7 +250,7 @@ def build_familiar_chain() -> Runnable:
     prompt = ChatPromptTemplate.from_template(
         """You are an experienced field naturalist writing for a homeowner or land steward.
 
-Write a short body for the **Familiar residents** section. No heading. 150-250 words.
+Write a short body for the **Familiar residents** section. No heading. English only. 150-250 words.
 
 These species had many detections in the prior window and a nearby iNaturalist
 record. Mention a few by name and say they are the regulars. A complete table
