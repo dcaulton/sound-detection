@@ -6,6 +6,8 @@ from sound_detection.api.v1.routers.birdnet_compat import (
     _parse_day,
     _window,
     is_binomial,
+    parse_clades,
+    passes_clades,
     passes_gate,
 )
 
@@ -61,3 +63,18 @@ def test_gate_rare_is_both_models_and_not_local() -> None:
 def test_gate_all_keeps_a_single_model() -> None:
     assert passes_gate("all", True, False, None)
     assert passes_gate("all", False, True, 1000.0)
+
+
+def test_parse_clades() -> None:
+    assert parse_clades("Turdus, Strix, -Insecta") == (["Turdus", "Strix"], ["Insecta"])
+    assert parse_clades(None) == ([], [])
+    assert parse_clades("") == ([], [])
+
+
+def test_passes_clades_prefix_and_ancestry() -> None:
+    ancestry = ["Calypte anna", "Trochilidae", "Apodiformes", "Aves"]
+    assert passes_clades("Calypte anna", ["Calypte"], [], ancestry)
+    assert passes_clades("Calypte anna", ["Aves"], [], ancestry)
+    assert not passes_clades("Calypte anna", ["Turdus"], [], ancestry)
+    assert not passes_clades("Calypte anna", [], ["Apodiformes"], ancestry)
+    assert passes_clades("Calypte anna", [], [], ancestry)

@@ -64,6 +64,49 @@ def is_binomial(name: str) -> bool:
     return parts[0][:1].isupper() and parts[1][:1].islower()
 
 
+def parse_clades(raw: str | None) -> tuple[list[str], list[str]]:
+    """'Turdus, Strix, -Insecta' -> includes, excludes. A leading minus withholds."""
+    include: list[str] = []
+    exclude: list[str] = []
+    for token in (raw or "").replace(";", ",").split(","):
+        text = token.strip()
+        if not text:
+            continue
+        if text.startswith("-"):
+            name = text[1:].strip()
+            if name:
+                exclude.append(name)
+        else:
+            include.append(text)
+    return include, exclude
+
+
+def _matches_token(scientific: str, token: str, ancestry: list[str]) -> bool:
+    """Genus is a name prefix. Anything else matches an ancestry name."""
+    if scientific == token or scientific.startswith(token + " "):
+        return True
+    wanted = token.lower()
+    return any(a.lower() == wanted for a in ancestry)
+
+
+def _ancestry(name: str) -> list[str]:
+    from sound_detection.db.neo4j import get_neo4j_driver
+    from sound_detection.knowledge.taxonomy import ancestry_names
+
+    try:
+        return ancestry_names(get_neo4j_driver(), name)
+    except Exception:
+        return [name]
+
+
+def passes_clades(scientific: str, include: list[str], exclude: list[str], ancestry: list[str]) -> bool:
+    if include and not any(_matches_token(scientific, t, ancestry) for t in include):
+        return False
+    if any(_matches_token(scientific, t, ancestry) for t in exclude):
+        return False
+    return True
+
+
 def passes_gate(
     gate: str,
     has_birdnet: bool,
@@ -190,18 +233,23 @@ async def species_summary(
     end_date: Annotated[str | None, Query()] = None,
     site_id: Annotated[UUID | None, Query()] = None,
     gate: Annotated[str, Query()] = "confirmed",
+    clades: Annotated[str | None, Query()] = None,
 ) -> list[dict[str, Any]]:
     """Species and counts. No dates means all time. gate defaults to confirmed."""
     start, end = _window(start_date, end_date)
     rows = await _model_rows(session, start, end, site_id)
     folded = _fold(rows)
     proximity = await _proximity(session, site_id)
+    include, exclude = parse_clades(clades)
 
-    kept = {
-        name: rec
-        for name, rec in folded.items()
-        if passes_gate(gate, rec["birdnet"], rec["perch"], proximity.get(name))
-    }
+    kept = {}
+    for name, rec in folded.items():
+        if not passes_gate(gate, rec["birdnet"], rec["perch"], proximity.get(name)):
+            continue
+        ancestry = _ancestry(name) if include or exclude else [name]
+        if not passes_clades(name, include, exclude, ancestry):
+            continue
+        kept[name] = rec
     missing = [name for name, rec in kept.items() if not rec["common"]]
     looked_up = _fill_common_names(missing)
 
@@ -246,8 +294,9 @@ async def _allowed(
     end: datetime | None,
     site_id: UUID | None,
     gate: str,
+    clades: str | None = None,
 ) -> bool:
-    """True if this species is a binomial and passes the gate in this window."""
+    """True if this species is a binomial and passes the gate and clade filter."""
     if not is_binomial(species):
         return False
     rows = await _model_rows(session, start, end, site_id, species)
@@ -256,7 +305,11 @@ async def _allowed(
     if rec is None:
         return False
     proximity = await _proximity(session, site_id)
-    return passes_gate(gate, rec["birdnet"], rec["perch"], proximity.get(species))
+    if not passes_gate(gate, rec["birdnet"], rec["perch"], proximity.get(species)):
+        return False
+    include, exclude = parse_clades(clades)
+    ancestry = _ancestry(species) if include or exclude else [species]
+    return passes_clades(species, include, exclude, ancestry)
 
 
 @router.get("/analytics/time/distribution/hourly")
@@ -267,10 +320,11 @@ async def hourly(
     end_date: Annotated[str | None, Query()] = None,
     site_id: Annotated[UUID | None, Query()] = None,
     gate: Annotated[str, Query()] = "confirmed",
+    clades: Annotated[str | None, Query()] = None,
 ) -> list[dict[str, int]]:
     """Hour-of-day counts. Empty if the species fails the gate."""
     start, end = _window(start_date, end_date)
-    if not await _allowed(session, species, start, end, site_id, gate):
+    if not await _allowed(session, species, start, end, site_id, gate, clades):
         return []
     heard = func.coalesce(Detection.start_time, Detection.created_at)
     hour = func.extract("hour", heard)
@@ -299,10 +353,11 @@ async def daily(
     end_date: Annotated[str | None, Query()] = None,
     site_id: Annotated[UUID | None, Query()] = None,
     gate: Annotated[str, Query()] = "confirmed",
+    clades: Annotated[str | None, Query()] = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Calls per day. Empty if the species fails the gate."""
     start, end = _window(start_date, end_date)
-    if not await _allowed(session, species, start, end, site_id, gate):
+    if not await _allowed(session, species, start, end, site_id, gate, clades):
         return {"data": []}
     heard = func.coalesce(Detection.start_time, Detection.created_at)
     day = func.date(heard)
@@ -339,9 +394,10 @@ async def detections(
     numResults: Annotated[int, Query()] = 4,
     site_id: Annotated[UUID | None, Query()] = None,
     gate: Annotated[str, Query()] = "confirmed",
+    clades: Annotated[str | None, Query()] = None,
 ) -> list[dict[str, Any]]:
     """Latest detections. Empty if the species fails the gate."""
-    if not await _allowed(session, species, None, None, site_id, gate):
+    if not await _allowed(session, species, None, None, site_id, gate, clades):
         return []
     heard = func.coalesce(Detection.start_time, Detection.created_at)
     stmt = (
