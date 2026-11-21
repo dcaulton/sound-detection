@@ -6,6 +6,12 @@ BIRDNET_URL at this API.
 
 Supported periods are whatever Birdsong asks for. "Last 30 days" arrives as
 start_date/end_date on the summary. "All time" arrives with no dates.
+
+gate (default confirmed):
+  confirmed  both BirdNET and Perch
+  local      at least one model, and iNat within 100 miles
+  rare       both models, and iNat has nothing nearby
+  all        every binomial, including single-model hits
 """
 
 from __future__ import annotations
@@ -18,11 +24,17 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, func, select
 
-from sound_detection.db.models import Detection, Microphone, Recording
+from sound_detection.db.models import Detection, Microphone, Recording, SpeciesSiteProximity
 from sound_detection.db.session import get_db
+from sound_detection.knowledge.filtering import NON_SPECIES_LABELS, is_local, is_unexpected
 
 router = APIRouter(prefix="/api/v2", tags=["birdnet-compat"])
 db_dep = Depends(get_db)
+
+PLACEHOLDER = "NEEDS COMMON NAME"
+NEAR_KM = 160.9344  # 100 miles
+FAR_KM = 804.672  # 500 miles
+GATES = {"confirmed", "local", "rare", "all"}
 
 
 def _parse_day(value: str | None) -> datetime | None:
@@ -42,7 +54,33 @@ def _window(start_date: str | None, end_date: str | None) -> tuple[datetime | No
     return start, end
 
 
-PLACEHOLDER = "NEEDS COMMON NAME"
+def is_binomial(name: str) -> bool:
+    """True for 'Genus species'. Drops Engine, Dog, and Walk_and_footsteps."""
+    if not name or name.lower().strip() in NON_SPECIES_LABELS:
+        return False
+    parts = name.split()
+    if len(parts) != 2 or "_" in name:
+        return False
+    return parts[0][:1].isupper() and parts[1][:1].islower()
+
+
+def passes_gate(
+    gate: str,
+    has_birdnet: bool,
+    has_perch: bool,
+    distance_km: float | None,
+) -> bool:
+    """Which species a plate is allowed to show."""
+    chosen = gate if gate in GATES else "confirmed"
+    if chosen == "all":
+        return True
+    if chosen == "confirmed":
+        return has_birdnet and has_perch
+    if chosen == "local":
+        return (has_birdnet or has_perch) and is_local(distance_km, NEAR_KM)
+    if chosen == "rare":
+        return is_unexpected(has_birdnet, has_perch, distance_km, NEAR_KM, FAR_KM)
+    return has_birdnet and has_perch
 
 
 def _real_name(value: str | None, scientific: str) -> str | None:
@@ -59,21 +97,33 @@ def _heard(dt: datetime | None) -> str | None:
     return dt.astimezone(UTC).isoformat()
 
 
-@router.get("/analytics/species/summary")
-async def species_summary(
-    session: Annotated[AsyncSession, db_dep],
-    start_date: Annotated[str | None, Query()] = None,
-    end_date: Annotated[str | None, Query()] = None,
-    site_id: Annotated[UUID | None, Query()] = None,
-) -> list[dict[str, Any]]:
-    """Species and counts. No dates means all time."""
-    start, end = _window(start_date, end_date)
+async def _proximity(session: AsyncSession, site_id: UUID | None) -> dict[str, float | None]:
+    """scientific_name -> distance_km. Missing key means we never searched."""
+    stmt = select(SpeciesSiteProximity.scientific_name, SpeciesSiteProximity.distance_km)
+    if site_id is not None:
+        stmt = stmt.where(col(SpeciesSiteProximity.site_id) == site_id)
+    rows = (await session.execute(stmt)).all()
+    out: dict[str, float | None] = {}
+    for name, dist in rows:
+        # None means searched and found nothing. Keep it.
+        if name not in out or (out[name] is None and dist is not None):
+            out[name] = dist
+    return out
+
+
+async def _model_rows(
+    session: AsyncSession,
+    start: datetime | None,
+    end: datetime | None,
+    site_id: UUID | None,
+    species: str | None = None,
+) -> list[Any]:
     heard = func.coalesce(Detection.start_time, Detection.created_at)
-    # max() would pick the placeholder "NEEDS COMMON NAME" over a real name.
     real_common = func.max(Detection.common_name).filter(col(Detection.common_name) != PLACEHOLDER)
     stmt = (
         select(  # type: ignore[call-overload]
             Detection.scientific_name,
+            Detection.model,
             real_common.label("common_name"),
             func.count().label("count"),
             func.min(heard).label("first_heard"),
@@ -84,32 +134,92 @@ async def species_summary(
         .join(Recording, col(Detection.recording_id) == col(Recording.id))
         .join(Microphone, col(Recording.microphone_id) == col(Microphone.id))
         .where(col(Detection.scientific_name) != "")
-        .group_by(Detection.scientific_name)
-        .order_by(func.count().desc())
+        .group_by(Detection.scientific_name, Detection.model)
     )
+    if species is not None:
+        stmt = stmt.where(col(Detection.scientific_name) == species)
     if site_id is not None:
         stmt = stmt.where(col(Microphone.site_id) == site_id)
     if start is not None:
         stmt = stmt.where(heard >= start)
     if end is not None:
         stmt = stmt.where(heard < end)
+    return list((await session.execute(stmt)).all())
 
-    rows = (await session.execute(stmt)).all()
-    missing = [name for name, common, *_ in rows if name and not _real_name(common, name)]
+
+def _fold(rows: list[Any]) -> dict[str, dict[str, Any]]:
+    """One record per species, with which models saw it."""
+    folded: dict[str, dict[str, Any]] = {}
+    for name, model, common, count, first, last, max_conf, avg_conf in rows:
+        if not name or not is_binomial(name):
+            continue
+        rec = folded.setdefault(
+            name,
+            {
+                "common": None,
+                "count": 0,
+                "first": None,
+                "last": None,
+                "max_conf": 0.0,
+                "avg_sum": 0.0,
+                "avg_n": 0,
+                "birdnet": False,
+                "perch": False,
+            },
+        )
+        rec["count"] += int(count)
+        rec["birdnet"] = rec["birdnet"] or model != "perch"
+        rec["perch"] = rec["perch"] or model == "perch"
+        real = _real_name(common, name)
+        if real and not rec["common"]:
+            rec["common"] = real
+        if first is not None and (rec["first"] is None or first < rec["first"]):
+            rec["first"] = first
+        if last is not None and (rec["last"] is None or last > rec["last"]):
+            rec["last"] = last
+        rec["max_conf"] = max(rec["max_conf"], float(max_conf or 0))
+        rec["avg_sum"] += float(avg_conf or 0) * int(count)
+        rec["avg_n"] += int(count)
+    return folded
+
+
+@router.get("/analytics/species/summary")
+async def species_summary(
+    session: Annotated[AsyncSession, db_dep],
+    start_date: Annotated[str | None, Query()] = None,
+    end_date: Annotated[str | None, Query()] = None,
+    site_id: Annotated[UUID | None, Query()] = None,
+    gate: Annotated[str, Query()] = "confirmed",
+) -> list[dict[str, Any]]:
+    """Species and counts. No dates means all time. gate defaults to confirmed."""
+    start, end = _window(start_date, end_date)
+    rows = await _model_rows(session, start, end, site_id)
+    folded = _fold(rows)
+    proximity = await _proximity(session, site_id)
+
+    kept = {
+        name: rec
+        for name, rec in folded.items()
+        if passes_gate(gate, rec["birdnet"], rec["perch"], proximity.get(name))
+    }
+    missing = [name for name, rec in kept.items() if not rec["common"]]
     looked_up = _fill_common_names(missing)
-    return [
-        {
-            "scientific_name": name,
-            "common_name": _real_name(common, name) or looked_up.get(name) or name,
-            "count": int(count),
-            "first_heard": _heard(first),
-            "last_heard": _heard(last),
-            "max_confidence": float(max_conf or 0),
-            "avg_confidence": float(avg_conf or 0),
-        }
-        for name, common, count, first, last, max_conf, avg_conf in rows
-        if name
-    ]
+
+    out = []
+    for name, rec in kept.items():
+        out.append(
+            {
+                "scientific_name": name,
+                "common_name": rec["common"] or looked_up.get(name) or name,
+                "count": rec["count"],
+                "first_heard": _heard(rec["first"]),
+                "last_heard": _heard(rec["last"]),
+                "max_confidence": rec["max_conf"],
+                "avg_confidence": rec["avg_sum"] / rec["avg_n"] if rec["avg_n"] else 0.0,
+            }
+        )
+    out.sort(key=lambda r: r["count"], reverse=True)
+    return out
 
 
 def _fill_common_names(names: list[str]) -> dict[str, str]:
@@ -129,6 +239,26 @@ def _fill_common_names(names: list[str]) -> dict[str, str]:
     return {r["name"]: r["common"] for r in rows if r.get("common") and r["common"].strip().upper() != PLACEHOLDER}
 
 
+async def _allowed(
+    session: AsyncSession,
+    species: str,
+    start: datetime | None,
+    end: datetime | None,
+    site_id: UUID | None,
+    gate: str,
+) -> bool:
+    """True if this species is a binomial and passes the gate in this window."""
+    if not is_binomial(species):
+        return False
+    rows = await _model_rows(session, start, end, site_id, species)
+    folded = _fold(rows)
+    rec = folded.get(species)
+    if rec is None:
+        return False
+    proximity = await _proximity(session, site_id)
+    return passes_gate(gate, rec["birdnet"], rec["perch"], proximity.get(species))
+
+
 @router.get("/analytics/time/distribution/hourly")
 async def hourly(
     session: Annotated[AsyncSession, db_dep],
@@ -136,9 +266,12 @@ async def hourly(
     start_date: Annotated[str | None, Query()] = None,
     end_date: Annotated[str | None, Query()] = None,
     site_id: Annotated[UUID | None, Query()] = None,
+    gate: Annotated[str, Query()] = "confirmed",
 ) -> list[dict[str, int]]:
-    """Hour-of-day counts. Birdsong expects {hour, count}."""
+    """Hour-of-day counts. Empty if the species fails the gate."""
     start, end = _window(start_date, end_date)
+    if not await _allowed(session, species, start, end, site_id, gate):
+        return []
     heard = func.coalesce(Detection.start_time, Detection.created_at)
     hour = func.extract("hour", heard)
     stmt = (
@@ -154,7 +287,6 @@ async def hourly(
         stmt = stmt.where(heard >= start)
     if end is not None:
         stmt = stmt.where(heard < end)
-
     rows = (await session.execute(stmt)).all()
     return [{"hour": int(h), "count": int(c)} for h, c in rows]
 
@@ -166,9 +298,12 @@ async def daily(
     start_date: Annotated[str | None, Query()] = None,
     end_date: Annotated[str | None, Query()] = None,
     site_id: Annotated[UUID | None, Query()] = None,
+    gate: Annotated[str, Query()] = "confirmed",
 ) -> dict[str, list[dict[str, Any]]]:
-    """Calls per day. Birdsong reads j.data[].date and .count."""
+    """Calls per day. Empty if the species fails the gate."""
     start, end = _window(start_date, end_date)
+    if not await _allowed(session, species, start, end, site_id, gate):
+        return {"data": []}
     heard = func.coalesce(Detection.start_time, Detection.created_at)
     day = func.date(heard)
     stmt = (
@@ -185,7 +320,6 @@ async def daily(
         stmt = stmt.where(heard >= start)
     if end is not None:
         stmt = stmt.where(heard < end)
-
     rows = (await session.execute(stmt)).all()
     return {"data": [{"date": str(d)[:10], "count": int(c)} for d, c in rows]}
 
@@ -195,10 +329,7 @@ async def species_info(
     scientific_name: Annotated[str, Query()],
 ) -> dict[str, Any]:
     """Family and order. Empty for now; Birdsong hides missing facts."""
-    return {
-        "scientific_name": scientific_name,
-        "taxonomy": {},
-    }
+    return {"scientific_name": scientific_name, "taxonomy": {}}
 
 
 @router.get("/detections")
@@ -207,8 +338,11 @@ async def detections(
     species: Annotated[str, Query()],
     numResults: Annotated[int, Query()] = 4,
     site_id: Annotated[UUID | None, Query()] = None,
+    gate: Annotated[str, Query()] = "confirmed",
 ) -> list[dict[str, Any]]:
-    """Latest detections. No audio yet; the card still lists time and confidence."""
+    """Latest detections. Empty if the species fails the gate."""
+    if not await _allowed(session, species, None, None, site_id, gate):
+        return []
     heard = func.coalesce(Detection.start_time, Detection.created_at)
     stmt = (
         select(Detection, heard.label("heard"))  # type: ignore[call-overload]
@@ -220,7 +354,6 @@ async def detections(
     )
     if site_id is not None:
         stmt = stmt.where(col(Microphone.site_id) == site_id)
-
     rows = (await session.execute(stmt)).all()
     out = []
     for det, when in rows:
