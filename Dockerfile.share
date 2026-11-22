@@ -26,6 +26,7 @@ RUN uv pip install --system --no-cache \
       "pydantic-settings>=2.5" \
       "sqlmodel>=0.0.22" \
       "psycopg[binary]>=3.2" \
+      "asyncpg>=0.30" \
       "alembic>=1.13" \
       "structlog>=24.4" \
       "neo4j>=6.2.0" \
