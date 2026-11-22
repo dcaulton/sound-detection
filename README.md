@@ -35,6 +35,18 @@ Recent work added a **criteria-driven BiomeSummaryService**. Species are filtere
 
 Optional `site_id` scopes every call to one site. Common names come from the detection row, ignoring the Perch placeholder `NEEDS COMMON NAME`, then from the Species node in Neo4j. There is no live iNat call. Art is Birdsong's own, looked up by scientific name.
 
+## Share / Birdsong deployment
+
+There is a separate docker image available that just serves up the minimal api/v2 stuff above that supports Birdsong.  This is used for a local read-only k8s deployment that is perfect for serving the Birdsong UI without heavier capabilities
+The lightweight read-only API used by Birdsong is `src/sound_detection/share.py`.
+It only mounts the `/api/v2` BirdNET-compatible routes.
+
+Build the share image with, this, then push to dockerhub:
+
+```bash
+docker build -f Dockerfile.share -t dcaulton/sound-detection-api:share .
+```
+
 
 ## Tech Stack
 
