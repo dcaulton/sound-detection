@@ -86,3 +86,21 @@ def in_scope(ancestry_names: list[str], criteria: dict[str, Any]) -> bool:
         consider = [consider]
     names_lower = {normalize_clade_name(n) for n in ancestry_names}
     return any(normalize_clade_name(c) in names_lower for c in consider)
+
+
+def public_criteria(criteria: dict[str, Any] | None) -> dict[str, Any]:
+    """Criteria as they should leave the API.
+
+    The service parks run configuration in criteria under leading-underscore
+    keys (``_dry_run``, ``_start_date``). Those stay the storage mechanism, but
+    callers get them back as ordinary documented fields so a client can tell
+    what kind of job it asked for.
+    """
+    out = dict(criteria or {})
+    dry_run = out.pop("_dry_run", None)
+    start_date = out.pop("_start_date", None)
+    if dry_run is not None:
+        out["dry_run"] = bool(dry_run)
+    if start_date is not None:
+        out["start_date"] = start_date
+    return out

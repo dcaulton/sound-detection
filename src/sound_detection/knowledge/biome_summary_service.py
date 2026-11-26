@@ -21,13 +21,15 @@ from sound_detection.knowledge.biome_narratives import (
     generate_narratives,
 )
 from sound_detection.knowledge.filtering import (
+    build_dry_run_report,
+    build_filter_report,
     confirmation_signal_count,
-    filter_species,
+    filter_species_with_report,
     is_confirmed_species,
     is_local,
     is_unexpected,
 )
-from sound_detection.knowledge.grading_criteria import DEFAULT_CRITERIA
+from sound_detection.knowledge.grading_criteria import DEFAULT_CRITERIA, public_criteria
 from sound_detection.knowledge.harvesters.inaturalist import miles_to_km
 from sound_detection.knowledge.rag.retriever import Retriever
 from sound_detection.knowledge.species_knowledge_service import SpeciesKnowledgeService
@@ -113,7 +115,8 @@ class BiomeSummaryService:
                     speculated_counts,
                     confirmed_species,
                     speculated_species,
-                ) = await self._gather_and_filter_species(summary, criteria)
+                    filter_report,
+                ) = await self._gather_and_filter_species(summary, criteria, dry_run=dry_run)
 
                 species_counts = {
                     name: confirmed_counts.get(name, 0) + speculated_counts.get(name, 0)
@@ -128,20 +131,27 @@ class BiomeSummaryService:
                 )
 
                 if dry_run:
+                    # A dry run stops here: no iNaturalist enrichment and no
+                    # LLM narrative generation. The payload is the filtering
+                    # report — what survived Phase 1 and why the rest did not.
                     summary.status = "dry_run_complete"
-                    summary.summary_json = {
-                        "window_days": summary.window_days,
-                        "dry_run": True,
-                        "confirmed_species_count": len(confirmed_counts),
-                        "speculated_species_count": len(speculated_counts),
-                        "confirmed_counts": confirmed_counts,
-                        "speculated_counts": speculated_counts,
-                        "confirmed_species": confirmed_species,
-                        "speculated_species": speculated_species,
-                        "generated_at": datetime.now(UTC).isoformat(),
-                    }
+                    summary.summary_json = build_dry_run_report(
+                        summary_id=summary.id,
+                        site_id=summary.site_id,
+                        window_days=summary.window_days,
+                        criteria=criteria,
+                        filter_report=filter_report,
+                        generated_at=datetime.now(UTC),
+                    )
+                    await self.session.commit()
                     duration = (datetime.now(UTC) - start_time).seconds
-                    log.info("dry_run_complete", summary_id=str(summary_id), duration_s=duration)
+                    log.info(
+                        "dry_run_complete",
+                        summary_id=str(summary_id),
+                        duration_s=duration,
+                        kept=filter_report["kept"]["total"],
+                        dropped=filter_report["dropped"]["total"],
+                    )
                     return
 
                 # === Phase 2: Per-Species Enrichment ===
@@ -226,6 +236,7 @@ class BiomeSummaryService:
                 "created_at": s.created_at.isoformat(),
                 "status": s.status,
                 "window_days": s.window_days,
+                "dry_run": bool((s.criteria or {}).get("_dry_run", False)),
             }
             for s in summaries
         ]
@@ -243,7 +254,7 @@ class BiomeSummaryService:
             "created_at": summary.created_at.isoformat(),
             "status": summary.status,
             "window_days": summary.window_days,
-            "criteria": summary.criteria or {},
+            "criteria": public_criteria(summary.criteria or {}),
             "summary_json": summary.summary_json,
             "narrative": summary.narrative,  # existing (Weathervane)
             "human_narrative": summary.human_narrative,  # new pretty version
@@ -263,14 +274,15 @@ class BiomeSummaryService:
         return True
 
     async def _gather_and_filter_species(
-        self, summary: BiomeSummary, criteria: dict[str, Any]
-    ) -> tuple[dict[str, int], dict[str, int], list[dict], list[dict]]:
+        self, summary: BiomeSummary, criteria: dict[str, Any], *, dry_run: bool = False
+    ) -> tuple[dict[str, int], dict[str, int], list[dict], list[dict], dict[str, Any]]:
         """
         Returns:
             confirmed_counts:   scientific_name -> detection count for species with >= 2 of 3 signals
             speculated_counts:  scientific_name -> detection count for species with exactly 1 signal
             confirmed_species:  filtered list for enrichment (confirmation=confirmed)
             speculated_species: filtered list for enrichment (confirmation=speculated)
+            filter_report:      kept/dropped accounting for the Phase 1 filters
 
         A species is confirmed when at least two of these are true:
         BirdNET saw it, Perch saw it, or the nearest iNat observation is within
@@ -383,7 +395,15 @@ class BiomeSummaryService:
 
         if not confirmed_counts and not speculated_counts:
             log.info("no_detections", summary_id=str(summary.id))
-            return {}, {}, [], []
+            empty_report = build_filter_report(
+                confirmed_counts={},
+                speculated_counts={},
+                confirmed_species=[],
+                speculated_species=[],
+                confirmed_dropped=[],
+                speculated_dropped=[],
+            )
+            return {}, {}, [], [], empty_report
 
         all_counts = {**speculated_counts, **confirmed_counts}  # confirmed overwrites if both
         max_count = max(all_counts.values())
@@ -404,20 +424,23 @@ class BiomeSummaryService:
                     species_contexts[name] = context
 
         # Fill missing common names from iNat on the fly. Birds usually have one
-        # already; insects and mammals often do not.
-        missing = [n for n, ctx in species_contexts.items() if not ctx.get("common_name")]
-        missing += [n for n in set(confirmed_counts) | set(speculated_counts) if n not in species_contexts]
-        if missing:
-            from sound_detection.knowledge.harvesters.inaturalist import InaturalistHarvester
+        # already; insects and mammals often do not. Dry runs skip this entirely —
+        # the filtering report carries scientific names only, and a dry run must
+        # not reach out to iNaturalist.
+        if not dry_run:
+            missing = [n for n, ctx in species_contexts.items() if not ctx.get("common_name")]
+            missing += [n for n in set(confirmed_counts) | set(speculated_counts) if n not in species_contexts]
+            if missing:
+                from sound_detection.knowledge.harvesters.inaturalist import InaturalistHarvester
 
-            harvester = InaturalistHarvester()
-            for name in missing:
-                common = harvester.preferred_common_name(name)
-                if not common:
-                    continue
-                species_contexts.setdefault(name, {})["common_name"] = common
+                harvester = InaturalistHarvester()
+                for name in missing:
+                    common = harvester.preferred_common_name(name)
+                    if not common:
+                        continue
+                    species_contexts.setdefault(name, {})["common_name"] = common
 
-        confirmed_species, speculated_species = filter_species(
+        confirmed_species, speculated_species, filter_report = filter_species_with_report(
             confirmed_counts,
             speculated_counts,
             species_contexts,
@@ -445,7 +468,7 @@ class BiomeSummaryService:
             speculated_before=len(speculated_counts),
         )
 
-        return confirmed_counts, speculated_counts, confirmed_species, speculated_species
+        return confirmed_counts, speculated_counts, confirmed_species, speculated_species, filter_report
 
     async def _enrich_species(self, summary_id: UUID, filtered_species: list[dict], window_days: int) -> list[dict]:
         return await enrich_species(
